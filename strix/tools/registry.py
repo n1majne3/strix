@@ -5,7 +5,7 @@ from collections.abc import Callable
 from functools import wraps
 from inspect import signature
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import defusedxml.ElementTree as DefusedET
 
@@ -27,6 +27,11 @@ class ImplementedInClientSideOnlyError(Exception):
         super().__init__(self.message)
 
 
+# ---------------------------------------------------------------------------
+# XML schema loading (kept for conversion to JSON-schema; removed in S03)
+# ---------------------------------------------------------------------------
+
+
 def _process_dynamic_content(content: str) -> str:
     if "{{DYNAMIC_SKILLS_DESCRIPTION}}" in content:
         try:
@@ -44,7 +49,8 @@ def _process_dynamic_content(content: str) -> str:
     return content
 
 
-def _load_xml_schema(path: Path) -> Any:
+def _load_xml_schema(path: Path) -> dict[str, str] | None:
+    """Load an XML schema file and return a dict mapping tool name → raw XML string."""
     if not path.exists():
         return None
     try:
@@ -54,7 +60,7 @@ def _load_xml_schema(path: Path) -> Any:
 
         start_tag = '<tool name="'
         end_tag = "</tool>"
-        tools_dict = {}
+        tools_dict: dict[str, str] = {}
 
         pos = 0
         while True:
@@ -87,32 +93,214 @@ def _load_xml_schema(path: Path) -> Any:
         return tools_dict
 
 
-def _parse_param_schema(tool_xml: str) -> dict[str, Any]:
-    params: set[str] = set()
-    required: set[str] = set()
+# ---------------------------------------------------------------------------
+# JSON-schema extraction
+# ---------------------------------------------------------------------------
 
-    params_start = tool_xml.find("<parameters>")
-    params_end = tool_xml.find("</parameters>")
+_XML_TYPE_MAP: dict[str, str] = {
+    "string": "string",
+    "boolean": "boolean",
+    "bool": "boolean",
+    "integer": "integer",
+    "int": "integer",
+    "number": "number",
+    "float": "number",
+    "array": "array",
+    "object": "object",
+}
 
-    if params_start == -1 or params_end == -1:
-        return {"params": set(), "required": set(), "has_params": False}
+_PYTHON_TYPE_MAP: dict[type, str] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+}
 
-    params_section = tool_xml[params_start : params_end + len("</parameters>")]
 
+def _xml_type_to_json(xml_type: str) -> str:
+    """Convert an XML schema type attribute to a JSON-schema type string."""
+    return _XML_TYPE_MAP.get(xml_type.lower(), "string")
+
+
+def _extract_description_text(element: DefusedET.Element | object) -> str:
+    """Extract text content from a <description> sub-element."""
+    if not hasattr(element, "find"):
+        return ""
+    desc = element.find("description")  # type: ignore[union-attr]
+    if desc is not None and desc.text:
+        return desc.text.strip()
+    return ""
+
+
+def _extract_json_schema_from_xml(tool_name: str, xml: str) -> dict[str, Any] | None:
+    """Parse an XML tool definition into a JSON-schema dict.
+
+    Returns a dict matching the OpenAI ``function`` envelope:
+    ``{"name": ..., "description": ..., "parameters": {"type": "object", "properties": {...}, "required": [...]}}``
+    or *None* if the XML cannot be parsed.
+    """
+    # Wrap in a root so defusedxml is happy even if there's no <tools> wrapper
+    wrapped = f"<_root>{xml}</_root>"
     try:
-        root = DefusedET.fromstring(params_section)
+        root = DefusedET.fromstring(wrapped)
     except DefusedET.ParseError:
-        return {"params": set(), "required": set(), "has_params": False}
+        return None
 
-    for param in root.findall(".//parameter"):
-        name = param.attrib.get("name")
-        if not name:
+    tool_el = None
+    for candidate in root.findall("tool"):
+        if candidate.attrib.get("name") == tool_name:
+            tool_el = candidate
+            break
+    if tool_el is None:
+        # If the XML fragment is a single <tool>, the wrapper makes it direct child
+        for candidate in root:
+            if hasattr(candidate, "attrib") and candidate.attrib.get("name") == tool_name:
+                tool_el = candidate
+                break
+    if tool_el is None:
+        return None
+
+    description = ""
+    desc_el = tool_el.find("description")
+    if desc_el is not None and desc_el.text:
+        description = desc_el.text.strip()
+
+    params_el = tool_el.find("parameters")
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    if params_el is not None:
+        for param in params_el.findall("parameter"):
+            pname = param.attrib.get("name")
+            if not pname:
+                continue
+
+            ptype = _xml_type_to_json(param.attrib.get("type", "string"))
+            pdesc = _extract_description_text(param)
+            prop: dict[str, Any] = {"type": ptype}
+            if pdesc:
+                prop["description"] = pdesc
+            properties[pname] = prop
+
+            if param.attrib.get("required", "false").lower() == "true":
+                required.append(pname)
+
+    return {
+        "name": tool_name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            **({"required": required} if required else {}),
+        },
+    }
+
+
+def _python_type_to_json(annotation: Any) -> str:
+    """Map a Python type annotation to a JSON-schema type string."""
+    if annotation is inspect.Parameter.empty:
+        return "string"
+
+    # Handle `X | None` (Python 3.10+) and `Optional[X]`
+    origin = getattr(annotation, "__origin__", None)
+    if origin is str:
+        return "string"
+
+    # Check for Union types (Optional[X] is Union[X, None])
+    if origin is not None:
+        import typing
+
+        if hasattr(typing, "get_args") and hasattr(typing, "Union"):
+            args = getattr(annotation, "__args__", ())
+            # Filter out NoneType
+            non_none = [a for a in args if a is not type(None)]
+            if non_none:
+                return _python_type_to_json(non_none[0])
+        # list[X] → array
+        if origin in (list,):
+            return "array"
+        # dict[X, Y] → object
+        if origin in (dict,):
+            return "object"
+
+    direct = _PYTHON_TYPE_MAP.get(annotation)
+    if direct:
+        return direct
+
+    return "string"
+
+
+def _infer_json_schema_from_signature(func: Callable[..., Any]) -> dict[str, Any]:
+    """Build a JSON-schema definition from the function's signature and docstring."""
+    name = func.__name__
+    doc = (func.__doc__ or "").strip()
+    # Take only the first paragraph as description
+    description = doc.split("\n\n")[0].strip() if doc else ""
+
+    sig = signature(func)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    # Try to resolve type hints (may fail in edge cases)
+    try:
+        hints = get_type_hints(func)
+    except Exception:
+        hints = {}
+
+    for pname, param in sig.parameters.items():
+        if pname in ("self", "cls", "agent_state"):
             continue
-        params.add(name)
-        if param.attrib.get("required", "false").lower() == "true":
-            required.add(name)
 
-    return {"params": params, "required": required, "has_params": bool(params or required)}
+        annotation = hints.get(pname, param.annotation)
+        ptype = _python_type_to_json(annotation)
+        prop: dict[str, Any] = {"type": ptype}
+
+        # Extract per-parameter description from docstring (Google / Sphinx style)
+        if doc:
+            for line in doc.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(f"{pname}:") or stripped.startswith(f"{pname} -"):
+                    prop["description"] = stripped.split(":", 1)[-1].split("-", 1)[-1].strip()
+                    break
+
+        properties[pname] = prop
+
+        if param.default is inspect.Parameter.empty:
+            required.append(pname)
+
+    return {
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            **({"required": required} if required else {}),
+        },
+    }
+
+
+def _extract_json_schema(func: Callable[..., Any], xml_tools: dict[str, str] | None) -> dict[str, Any]:
+    """Produce a JSON-schema tool definition for *func*.
+
+    Priority:
+    1. If an XML schema is available, parse it into JSON-schema.
+    2. Otherwise, infer from the function signature and docstring.
+    """
+    name = func.__name__
+
+    if xml_tools and name in xml_tools:
+        schema = _extract_json_schema_from_xml(name, xml_tools[name])
+        if schema is not None:
+            return schema
+
+    return _infer_json_schema_from_signature(func)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _get_module_name(func: Callable[..., Any]) -> str:
@@ -187,6 +375,11 @@ def _should_register_tool(
     return not (requires_web_search_mode and not _has_perplexity_api())
 
 
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
 def register_tool(
     func: Callable[..., Any] | None = None,
     *,
@@ -203,13 +396,14 @@ def register_tool(
             return f
 
         sandbox_mode = _is_sandbox_mode()
-        func_dict = {
+        func_dict: dict[str, Any] = {
             "name": f.__name__,
             "function": f,
             "module": _get_module_name(f),
             "sandbox_execution": sandbox_execution,
         }
 
+        xml_tools: dict[str, str] | None = None
         if not sandbox_mode:
             try:
                 schema_path = _get_schema_path(f)
@@ -231,10 +425,17 @@ def register_tool(
                     "</tool>"
                 )
 
-        if not sandbox_mode:
-            xml_schema = func_dict.get("xml_schema")
-            param_schema = _parse_param_schema(xml_schema if isinstance(xml_schema, str) else "")
-            _tool_param_schemas[str(func_dict["name"])] = param_schema
+        # --- JSON-schema extraction (new) ---
+        json_schema = _extract_json_schema(f, xml_tools)
+        func_dict["json_schema"] = json_schema
+
+        # Populate _tool_param_schemas with JSON-schema-based info
+        params_info: dict[str, Any] = {
+            "properties": json_schema.get("parameters", {}).get("properties", {}),
+            "required": json_schema.get("parameters", {}).get("required", []),
+            "has_params": bool(json_schema.get("parameters", {}).get("properties")),
+        }
+        _tool_param_schemas[str(func_dict["name"])] = params_info
 
         tools.append(func_dict)
         _tools_by_name[str(func_dict["name"])] = f
@@ -250,6 +451,11 @@ def register_tool(
     return decorator(func)
 
 
+# ---------------------------------------------------------------------------
+# Public query helpers
+# ---------------------------------------------------------------------------
+
+
 def get_tool_by_name(name: str) -> Callable[..., Any] | None:
     return _tools_by_name.get(name)
 
@@ -259,6 +465,11 @@ def get_tool_names() -> list[str]:
 
 
 def get_tool_param_schema(name: str) -> dict[str, Any] | None:
+    """Return JSON-schema-based parameter info for a registered tool.
+
+    Returns a dict with keys ``properties``, ``required``, ``has_params``,
+    or *None* if the tool is not found.
+    """
     return _tool_param_schemas.get(name)
 
 
@@ -277,27 +488,28 @@ def should_execute_in_sandbox(tool_name: str) -> bool:
     return True
 
 
-def get_tools_prompt() -> str:
-    tools_by_module: dict[str, list[dict[str, Any]]] = {}
+def get_tools_definitions() -> list[dict[str, Any]]:
+    """Return tool definitions in OpenAI function-calling format.
+
+    Each entry is ``{"type": "function", "function": {...}}`` where the
+    ``function`` value contains ``name``, ``description``, and ``parameters``
+    conforming to JSON-schema.
+    """
+    definitions: list[dict[str, Any]] = []
     for tool in tools:
-        module = tool.get("module", "unknown")
-        if module not in tools_by_module:
-            tools_by_module[module] = []
-        tools_by_module[module].append(tool)
+        json_schema = tool.get("json_schema")
+        if json_schema is None:
+            continue
+        definitions.append({
+            "type": "function",
+            "function": json_schema,
+        })
+    return definitions
 
-    xml_sections = []
-    for module, module_tools in sorted(tools_by_module.items()):
-        tag_name = f"{module}_tools"
-        section_parts = [f"<{tag_name}>"]
-        for tool in module_tools:
-            tool_xml = tool.get("xml_schema", "")
-            if tool_xml:
-                indented_tool = "\n".join(f"  {line}" for line in tool_xml.split("\n"))
-                section_parts.append(indented_tool)
-        section_parts.append(f"</{tag_name}>")
-        xml_sections.append("\n".join(section_parts))
 
-    return "\n\n".join(xml_sections)
+def get_tools_prompt() -> str:
+    """Return an empty string. Kept for backward compatibility; removed in S03."""
+    return ""
 
 
 def clear_registry() -> None:
