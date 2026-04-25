@@ -97,3 +97,22 @@ Thumbs.db
 schema.graphql
 
 .opencode/
+
+# ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+.mcp.json
+.bg-shell/
+*~
+*.code-workspace
+.env.*
+!.env.example
+node_modules/
+.next/
+*.pyc
+.venv/
+target/
+vendor/
+coverage/
+.cache/
+tmp/
