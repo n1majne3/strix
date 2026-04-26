@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 import litellm
@@ -13,6 +12,7 @@ from litellm.utils import supports_prompt_caching, supports_vision
 from strix.config import Config
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
+from strix.llm.provider_base import LLMRequestFailedError, LLMResponse, RequestStats
 from strix.skills import load_skills
 from strix.tools.registry import get_tools_definitions
 from strix.utils.resource_paths import get_strix_resource_path
@@ -22,44 +22,6 @@ logger = logging.getLogger(__name__)
 
 litellm.drop_params = True
 litellm.modify_params = True
-
-
-class LLMRequestFailedError(Exception):
-    def __init__(self, message: str, details: str | None = None):
-        super().__init__(message)
-        self.message = message
-        self.details = details
-
-
-@dataclass
-class LLMResponse:
-    content: str
-    tool_invocations: list[dict[str, Any]] | None = None
-    tool_calls: list[dict[str, Any]] | None = None
-    thinking_blocks: list[dict[str, Any]] | None = None
-    # Partial tool-call state during streaming.  Maps tool-call index →
-    # ``{"id": str, "name": str, "arguments": str}`` where *arguments* is
-    # the raw accumulated JSON fragment.  ``None`` when no tool-call data
-    # has been seen yet on this response.
-    streaming_tool_states: dict[int, dict[str, str]] | None = None
-
-
-@dataclass
-class RequestStats:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
-    cost: float = 0.0
-    requests: int = 0
-
-    def to_dict(self) -> dict[str, int | float]:
-        return {
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "cached_tokens": self.cached_tokens,
-            "cost": round(self.cost, 4),
-            "requests": self.requests,
-        }
 
 
 class LLM:
