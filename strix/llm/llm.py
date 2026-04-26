@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -11,15 +13,11 @@ from litellm.utils import supports_prompt_caching, supports_vision
 from strix.config import Config
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
-from strix.llm.utils import (
-    _truncate_to_first_function,
-    fix_incomplete_tool_call,
-    normalize_tool_format,
-    parse_tool_invocations,
-)
 from strix.skills import load_skills
-from strix.tools import get_tools_prompt
+from strix.tools.registry import get_tools_definitions
 from strix.utils.resource_paths import get_strix_resource_path
+
+logger = logging.getLogger(__name__)
 
 
 litellm.drop_params = True
@@ -37,6 +35,7 @@ class LLMRequestFailedError(Exception):
 class LLMResponse:
     content: str
     tool_invocations: list[dict[str, Any]] | None = None
+    tool_calls: list[dict[str, Any]] | None = None
     thinking_blocks: list[dict[str, Any]] | None = None
 
 
@@ -98,7 +97,7 @@ class LLM:
             env.globals["get_skill"] = lambda name: skill_content.get(name, "")
 
             result = env.get_template("system_prompt.jinja").render(
-                get_tools_prompt=get_tools_prompt,
+                get_tools_prompt=lambda: "",
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
                 system_prompt_context=self._system_prompt_context,
@@ -188,23 +187,66 @@ class LLM:
             delta = self._get_chunk_content(chunk)
             if delta:
                 accumulated += delta
-                if "</function>" in accumulated or "</invoke>" in accumulated:
-                    end_tag = "</function>" if "</function>" in accumulated else "</invoke>"
-                    pos = accumulated.find(end_tag)
-                    accumulated = accumulated[: pos + len(end_tag)]
-                    yield LLMResponse(content=accumulated)
-                    done_streaming = 1
-                    continue
                 yield LLMResponse(content=accumulated)
 
+        # Build the complete response from chunks for metadata extraction
+        built_response = None
         if chunks:
-            self._update_usage_stats(stream_chunk_builder(chunks))
+            try:
+                built_response = stream_chunk_builder(chunks)
+                self._update_usage_stats(built_response)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to build stream response for usage stats")
 
-        accumulated = normalize_tool_format(accumulated)
-        accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
+        # Extract native tool_calls from the response
+        tool_calls_raw: list[dict[str, Any]] | None = None
+        tool_invocations: list[dict[str, Any]] | None = None
+
+        if built_response and built_response.choices:
+            message = built_response.choices[0].message
+            raw_tool_calls = getattr(message, "tool_calls", None)
+
+            if raw_tool_calls:
+                tool_calls_raw = []
+                tool_invocations = []
+                for tc in raw_tool_calls:
+                    tc_dict = {
+                        "id": tc.id,
+                        "type": getattr(tc, "type", "function"),
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    tool_calls_raw.append(tc_dict)
+
+                    # Parse arguments JSON string to typed args dict
+                    try:
+                        args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Failed to parse tool call arguments for %s: %s",
+                            tc.function.name,
+                            tc.function.arguments[:200],
+                        )
+                        args = {}
+
+                    tool_invocations.append({
+                        "toolName": tc.function.name,
+                        "args": args,
+                    })
+
+        # Use content from accumulated streaming text, or from the built response
+        final_content = accumulated
+        if not final_content and built_response and built_response.choices:
+            msg_content = getattr(built_response.choices[0].message, "content", None)
+            if msg_content:
+                final_content = msg_content
+
         yield LLMResponse(
-            content=accumulated,
-            tool_invocations=parse_tool_invocations(accumulated),
+            content=final_content or "",
+            tool_invocations=tool_invocations,
+            tool_calls=tool_calls_raw,
             thinking_blocks=self._extract_thinking(chunks),
         )
 
@@ -228,7 +270,65 @@ class LLM:
         compressed = list(self.memory_compressor.compress_history(conversation_history))
         conversation_history.clear()
         conversation_history.extend(compressed)
-        messages.extend(compressed)
+
+        # Convert conversation history to LiteLLM-compatible format.
+        # The internal history stores assistant messages with native tool_calls
+        # and tool results as user messages.  We convert these to the format
+        # LiteLLM expects: assistant messages with tool_calls → tool role messages.
+        i = 0
+        while i < len(compressed):
+            msg = compressed[i]
+
+            # Assistant message with native tool_calls → include tool_calls for API
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                api_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": msg.get("content") or None,
+                    "tool_calls": msg["tool_calls"],
+                }
+                # Strip internal-only keys (thinking_blocks) that LiteLLM doesn't expect
+                messages.append(api_msg)
+
+                # Next message should be tool results (stored as user message).
+                # Convert to individual tool role messages with matching tool_call_ids.
+                if i + 1 < len(compressed):
+                    next_msg = compressed[i + 1]
+                    if (
+                        next_msg.get("role") == "user"
+                        and isinstance(next_msg.get("content"), str)
+                        and "Tool Results:" in next_msg.get("content", "")
+                    ):
+                        tool_messages = self._convert_tool_results_to_tool_messages(
+                            next_msg["content"], msg["tool_calls"]
+                        )
+                        messages.extend(tool_messages)
+                        i += 2  # Skip both the assistant and the user (tool results) message
+                        continue
+                    elif (
+                        next_msg.get("role") == "user"
+                        and isinstance(next_msg.get("content"), list)
+                    ):
+                        # Handle image-containing tool results
+                        text_content = ""
+                        for part in next_msg["content"]:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                text_content = part.get("text", "")
+                                break
+                        if "Tool Results:" in text_content:
+                            tool_messages = self._convert_tool_results_to_tool_messages(
+                                text_content, msg["tool_calls"]
+                            )
+                            messages.extend(tool_messages)
+                            i += 2
+                            continue
+
+                i += 1
+                continue
+
+            # Regular message — pass through as-is (strip internal keys)
+            api_msg = {"role": msg["role"], "content": msg.get("content", "")}
+            messages.append(api_msg)
+            i += 1
 
         if messages[-1].get("role") == "assistant" and not self.config.interactive:
             messages.append({"role": "user", "content": "<meta>Continue the task.</meta>"})
@@ -237,6 +337,68 @@ class LLM:
             messages = self._add_cache_control(messages)
 
         return messages
+
+    @staticmethod
+    def _convert_tool_results_to_tool_messages(
+        results_content: str, tool_calls: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convert a combined tool-results user message into individual tool role messages.
+
+        The executor stores all tool results in a single user message like:
+            "Tool Results:\\n\\n<tool_result>\\n<tool_name>X</tool_name>\\n<result>...</result>\\n</tool_result>"
+
+        We split by <tool_result> blocks and match them to tool_calls by name or position.
+        """
+        import re
+
+        # Extract individual tool result blocks
+        result_blocks: list[tuple[str, str]] = []  # (tool_name, result_text)
+        pattern = re.compile(
+            r"<tool_result>\s*<tool_name>(.*?)</tool_name>\s*<result>(.*?)</result>\s*</tool_result>",
+            re.DOTALL,
+        )
+        for m in pattern.finditer(results_content):
+            result_blocks.append((m.group(1).strip(), m.group(2)))
+
+        # If no XML blocks found, use the full content as a single result
+        if not result_blocks:
+            result_blocks = [("", results_content)]
+
+        # Build tool role messages, matching by name then falling back to position
+        tool_messages: list[dict[str, Any]] = []
+        used_indices: set[int] = set()
+
+        for block_name, block_result in result_blocks:
+            matched_id = None
+
+            # Try to match by function name
+            if block_name:
+                for idx, tc in enumerate(tool_calls):
+                    if idx not in used_indices and tc.get("function", {}).get("name") == block_name:
+                        matched_id = tc["id"]
+                        used_indices.add(idx)
+                        break
+
+            # Fall back to positional matching
+            if matched_id is None:
+                for idx, tc in enumerate(tool_calls):
+                    if idx not in used_indices:
+                        matched_id = tc["id"]
+                        used_indices.add(idx)
+                        break
+
+            # Last resort: use first tool_call id
+            if matched_id is None and tool_calls:
+                matched_id = tool_calls[0]["id"]
+
+            if matched_id:
+                tool_messages.append({
+                    "role": "tool",
+                    "tool_call_id": matched_id,
+                    "content": block_result,
+                })
+
+        return tool_messages
 
     def _build_completion_args(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         if not self._supports_vision():
@@ -247,6 +409,8 @@ class LLM:
             "messages": messages,
             "timeout": self.config.timeout,
             "stream_options": {"include_usage": True},
+            "tools": get_tools_definitions(),
+            "tool_choice": "auto",
         }
 
         if self.config.api_key:

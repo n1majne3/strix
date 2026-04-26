@@ -124,67 +124,86 @@ def _xml_type_to_json(xml_type: str) -> str:
     return _XML_TYPE_MAP.get(xml_type.lower(), "string")
 
 
-def _extract_description_text(element: DefusedET.Element | object) -> str:
-    """Extract text content from a <description> sub-element."""
-    if not hasattr(element, "find"):
+def _extract_str_between(text: str, start_tag: str, end_tag: str) -> str:
+    """Extract text between the first occurrence of *start_tag* and *end_tag*."""
+    s = text.find(start_tag)
+    if s == -1:
         return ""
-    desc = element.find("description")  # type: ignore[union-attr]
-    if desc is not None and desc.text:
-        return desc.text.strip()
-    return ""
+    s += len(start_tag)
+    e = text.find(end_tag, s)
+    if e == -1:
+        return ""
+    return text[s:e].strip()
+
+
+def _parse_param_elements_from_xml(params_section: str) -> list[tuple[str, str, str, bool]]:
+    """Parse ``<parameter>`` elements from a well-formed ``<parameters>`` block.
+
+    Returns a list of ``(name, xml_type, description, required)`` tuples.
+    Falls back to regex extraction if DefusedET cannot parse the section.
+    """
+    try:
+        root = DefusedET.fromstring(params_section)
+        results = []
+        for param in root.findall("parameter"):
+            name = param.attrib.get("name")
+            if not name:
+                continue
+            xml_type = param.attrib.get("type", "string")
+            desc_el = param.find("description")
+            desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
+            req = param.attrib.get("required", "false").lower() == "true"
+            results.append((name, xml_type, desc, req))
+        return results
+    except DefusedET.ParseError:
+        pass
+
+    # Fallback: regex-based extraction for malformed XML
+    import re
+
+    results = []
+    for m in re.finditer(r'<parameter\s+([^>]*)>(.*?)', params_section, re.DOTALL):
+        attrs_str = m.group(1)
+        inner = m.group(2)
+        name_m = re.search(r'name="([^"]*)"', attrs_str)
+        type_m = re.search(r'type="([^"]*)"', attrs_str)
+        req_m = re.search(r'required="([^"]*)"', attrs_str)
+        if not name_m:
+            continue
+        name = name_m.group(1)
+        xml_type = type_m.group(1) if type_m else "string"
+        desc_m = re.search(r'<description>(.*?)</description>', inner, re.DOTALL)
+        desc = desc_m.group(1).strip() if desc_m else ""
+        req = req_m.group(1).lower() == "true" if req_m else False
+        results.append((name, xml_type, desc, req))
+    return results
 
 
 def _extract_json_schema_from_xml(tool_name: str, xml: str) -> dict[str, Any] | None:
-    """Parse an XML tool definition into a JSON-schema dict.
+    """Parse an XML tool definition into a JSON-schema dict using string extraction.
 
-    Returns a dict matching the OpenAI ``function`` envelope:
-    ``{"name": ..., "description": ..., "parameters": {"type": "object", "properties": {...}, "required": [...]}}``
-    or *None* if the XML cannot be parsed.
+    The XML fragments may contain pseudo-XML in ``<examples>`` blocks (e.g.
+    ``<parameter=value>``) that break XML parsers.  We use string-based
+    extraction for the description and only parse the ``<parameters>`` block
+    (which is well-formed).
+
+    Returns ``{"name": ..., "description": ..., "parameters": {...}}`` or *None*.
     """
-    # Wrap in a root so defusedxml is happy even if there's no <tools> wrapper
-    wrapped = f"<_root>{xml}</_root>"
-    try:
-        root = DefusedET.fromstring(wrapped)
-    except DefusedET.ParseError:
-        return None
+    description = _extract_str_between(xml, "<description>", "</description>")
 
-    tool_el = None
-    for candidate in root.findall("tool"):
-        if candidate.attrib.get("name") == tool_name:
-            tool_el = candidate
-            break
-    if tool_el is None:
-        # If the XML fragment is a single <tool>, the wrapper makes it direct child
-        for candidate in root:
-            if hasattr(candidate, "attrib") and candidate.attrib.get("name") == tool_name:
-                tool_el = candidate
-                break
-    if tool_el is None:
-        return None
-
-    description = ""
-    desc_el = tool_el.find("description")
-    if desc_el is not None and desc_el.text:
-        description = desc_el.text.strip()
-
-    params_el = tool_el.find("parameters")
     properties: dict[str, Any] = {}
     required: list[str] = []
 
-    if params_el is not None:
-        for param in params_el.findall("parameter"):
-            pname = param.attrib.get("name")
-            if not pname:
-                continue
-
-            ptype = _xml_type_to_json(param.attrib.get("type", "string"))
-            pdesc = _extract_description_text(param)
+    params_section = _extract_str_between(xml, "<parameters>", "</parameters>")
+    if params_section:
+        wrapped = f"<parameters>{params_section}</parameters>"
+        for pname, xml_type, pdesc, is_req in _parse_param_elements_from_xml(wrapped):
+            ptype = _xml_type_to_json(xml_type)
             prop: dict[str, Any] = {"type": ptype}
             if pdesc:
                 prop["description"] = pdesc
             properties[pname] = prop
-
-            if param.attrib.get("required", "false").lower() == "true":
+            if is_req:
                 required.append(pname)
 
     return {
