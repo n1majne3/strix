@@ -761,13 +761,11 @@ class TestMultiAgentCoordination:
 
 
 class TestXMLNotConfusedWithToolCalls:
-    """Verify inter-agent XML tags in message content are NOT confused with tool calls."""
+    """Verify inter-agent XML tags in message content are handled correctly with native tool calling."""
 
     @pytest.mark.asyncio
-    async def test_inter_agent_message_not_parsed_as_tool_call(self):
-        """<inter_agent_message> in message content does NOT produce tool invocations."""
-        from strix.llm.utils import parse_tool_invocations
-
+    async def test_inter_agent_message_stripped_from_display(self):
+        """<inter_agent_message> in message content is stripped by clean_content, not parsed as a tool."""
         content = """<inter_agent_message>
     <delivery_notice>
         <important>Message from another agent</important>
@@ -781,15 +779,14 @@ Found XSS on /search?q=test
     </content>
 </inter_agent_message>"""
 
-        result = parse_tool_invocations(content)
-        # Should NOT be parsed as a tool call — <inter_agent_message> is not <function=...>
-        assert result is None
+        # clean_content should strip inter-agent XML entirely
+        cleaned = clean_content(content)
+        assert "<inter_agent_message>" not in cleaned
+        assert "Found XSS" not in cleaned
 
     @pytest.mark.asyncio
-    async def test_agent_completion_report_not_parsed_as_tool_call(self):
-        """<agent_completion_report> in message content does NOT produce tool invocations."""
-        from strix.llm.utils import parse_tool_invocations
-
+    async def test_agent_completion_report_stripped_from_display(self):
+        """<agent_completion_report> in message content is stripped by clean_content."""
         content = """<agent_completion_report>
     <agent_info>
         <agent_name>Scanner</agent_name>
@@ -802,14 +799,13 @@ Found XSS on /search?q=test
     </results>
 </agent_completion_report>"""
 
-        result = parse_tool_invocations(content)
-        assert result is None
+        cleaned = clean_content(content)
+        assert "<agent_completion_report>" not in cleaned
+        assert "Found 3 issues" not in cleaned
 
     @pytest.mark.asyncio
-    async def test_mixed_tool_call_and_inter_agent_xml(self):
-        """When a real tool call exists alongside inter-agent XML, only the tool call is parsed."""
-        from strix.llm.utils import parse_tool_invocations
-
+    async def test_tool_call_xml_stripped_inter_agent_preserved_in_history(self):
+        """When content has tool call XML, clean_content strips it but preserves surrounding text."""
         content = """I'll scan now.
 <function=run_terminal>
 <parameter=command>nmap -sV target
@@ -820,10 +816,14 @@ Also received this:
     <content>Be careful with port scanning</content>
 </inter_agent_message>"""
 
-        result = parse_tool_invocations(content)
-        assert result is not None
-        assert len(result) == 1
-        assert result[0]["toolName"] == "run_terminal"
+        cleaned = clean_content(content)
+        # Tool call XML should be stripped
+        assert "<function=" not in cleaned
+        assert "nmap" not in cleaned
+        # Inter-agent XML should also be stripped
+        assert "<inter_agent_message>" not in cleaned
+        # Prose preserved
+        assert "I'll scan now." in cleaned
 
     @pytest.mark.asyncio
     async def test_inter_agent_xml_preserved_in_history(self):

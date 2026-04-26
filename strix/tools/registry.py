@@ -4,13 +4,7 @@ import os
 from collections.abc import Callable
 from functools import wraps
 from inspect import signature
-from pathlib import Path
 from typing import Any, get_type_hints
-
-import defusedxml.ElementTree as DefusedET
-
-from strix.utils.resource_paths import get_strix_resource_path
-
 
 tools: list[dict[str, Any]] = []
 _tools_by_name: dict[str, Callable[..., Any]] = {}
@@ -28,86 +22,8 @@ class ImplementedInClientSideOnlyError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# XML schema loading (kept for conversion to JSON-schema; removed in S03)
-# ---------------------------------------------------------------------------
-
-
-def _process_dynamic_content(content: str) -> str:
-    if "{{DYNAMIC_SKILLS_DESCRIPTION}}" in content:
-        try:
-            from strix.skills import generate_skills_description
-
-            skills_description = generate_skills_description()
-            content = content.replace("{{DYNAMIC_SKILLS_DESCRIPTION}}", skills_description)
-        except ImportError:
-            logger.warning("Could not import skills utilities for dynamic schema generation")
-            content = content.replace(
-                "{{DYNAMIC_SKILLS_DESCRIPTION}}",
-                "List of skills to load for this agent (max 5). Skill discovery failed.",
-            )
-
-    return content
-
-
-def _load_xml_schema(path: Path) -> dict[str, str] | None:
-    """Load an XML schema file and return a dict mapping tool name → raw XML string."""
-    if not path.exists():
-        return None
-    try:
-        content = path.read_text(encoding="utf-8")
-
-        content = _process_dynamic_content(content)
-
-        start_tag = '<tool name="'
-        end_tag = "</tool>"
-        tools_dict: dict[str, str] = {}
-
-        pos = 0
-        while True:
-            start_pos = content.find(start_tag, pos)
-            if start_pos == -1:
-                break
-
-            name_start = start_pos + len(start_tag)
-            name_end = content.find('"', name_start)
-            if name_end == -1:
-                break
-            tool_name = content[name_start:name_end]
-
-            end_pos = content.find(end_tag, name_end)
-            if end_pos == -1:
-                break
-            end_pos += len(end_tag)
-
-            tool_element = content[start_pos:end_pos]
-            tools_dict[tool_name] = tool_element
-
-            pos = end_pos
-
-            if pos >= len(content):
-                break
-    except (IndexError, ValueError, UnicodeError) as e:
-        logger.warning(f"Error loading schema file {path}: {e}")
-        return None
-    else:
-        return tools_dict
-
-
-# ---------------------------------------------------------------------------
 # JSON-schema extraction
 # ---------------------------------------------------------------------------
-
-_XML_TYPE_MAP: dict[str, str] = {
-    "string": "string",
-    "boolean": "boolean",
-    "bool": "boolean",
-    "integer": "integer",
-    "int": "integer",
-    "number": "number",
-    "float": "number",
-    "array": "array",
-    "object": "object",
-}
 
 _PYTHON_TYPE_MAP: dict[type, str] = {
     str: "string",
@@ -117,104 +33,6 @@ _PYTHON_TYPE_MAP: dict[type, str] = {
     list: "array",
     dict: "object",
 }
-
-
-def _xml_type_to_json(xml_type: str) -> str:
-    """Convert an XML schema type attribute to a JSON-schema type string."""
-    return _XML_TYPE_MAP.get(xml_type.lower(), "string")
-
-
-def _extract_str_between(text: str, start_tag: str, end_tag: str) -> str:
-    """Extract text between the first occurrence of *start_tag* and *end_tag*."""
-    s = text.find(start_tag)
-    if s == -1:
-        return ""
-    s += len(start_tag)
-    e = text.find(end_tag, s)
-    if e == -1:
-        return ""
-    return text[s:e].strip()
-
-
-def _parse_param_elements_from_xml(params_section: str) -> list[tuple[str, str, str, bool]]:
-    """Parse ``<parameter>`` elements from a well-formed ``<parameters>`` block.
-
-    Returns a list of ``(name, xml_type, description, required)`` tuples.
-    Falls back to regex extraction if DefusedET cannot parse the section.
-    """
-    try:
-        root = DefusedET.fromstring(params_section)
-        results = []
-        for param in root.findall("parameter"):
-            name = param.attrib.get("name")
-            if not name:
-                continue
-            xml_type = param.attrib.get("type", "string")
-            desc_el = param.find("description")
-            desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
-            req = param.attrib.get("required", "false").lower() == "true"
-            results.append((name, xml_type, desc, req))
-        return results
-    except DefusedET.ParseError:
-        pass
-
-    # Fallback: regex-based extraction for malformed XML
-    import re
-
-    results = []
-    for m in re.finditer(r'<parameter\s+([^>]*)>(.*?)', params_section, re.DOTALL):
-        attrs_str = m.group(1)
-        inner = m.group(2)
-        name_m = re.search(r'name="([^"]*)"', attrs_str)
-        type_m = re.search(r'type="([^"]*)"', attrs_str)
-        req_m = re.search(r'required="([^"]*)"', attrs_str)
-        if not name_m:
-            continue
-        name = name_m.group(1)
-        xml_type = type_m.group(1) if type_m else "string"
-        desc_m = re.search(r'<description>(.*?)</description>', inner, re.DOTALL)
-        desc = desc_m.group(1).strip() if desc_m else ""
-        req = req_m.group(1).lower() == "true" if req_m else False
-        results.append((name, xml_type, desc, req))
-    return results
-
-
-def _extract_json_schema_from_xml(tool_name: str, xml: str) -> dict[str, Any] | None:
-    """Parse an XML tool definition into a JSON-schema dict using string extraction.
-
-    The XML fragments may contain pseudo-XML in ``<examples>`` blocks (e.g.
-    ``<parameter=value>``) that break XML parsers.  We use string-based
-    extraction for the description and only parse the ``<parameters>`` block
-    (which is well-formed).
-
-    Returns ``{"name": ..., "description": ..., "parameters": {...}}`` or *None*.
-    """
-    description = _extract_str_between(xml, "<description>", "</description>")
-
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-
-    params_section = _extract_str_between(xml, "<parameters>", "</parameters>")
-    if params_section:
-        wrapped = f"<parameters>{params_section}</parameters>"
-        for pname, xml_type, pdesc, is_req in _parse_param_elements_from_xml(wrapped):
-            ptype = _xml_type_to_json(xml_type)
-            prop: dict[str, Any] = {"type": ptype}
-            if pdesc:
-                prop["description"] = pdesc
-            properties[pname] = prop
-            if is_req:
-                required.append(pname)
-
-    return {
-        "name": tool_name,
-        "description": description,
-        "parameters": {
-            "type": "object",
-            "properties": properties,
-            **({"required": required} if required else {}),
-        },
-    }
 
 
 def _python_type_to_json(annotation: Any) -> str:
@@ -300,20 +118,8 @@ def _infer_json_schema_from_signature(func: Callable[..., Any]) -> dict[str, Any
     }
 
 
-def _extract_json_schema(func: Callable[..., Any], xml_tools: dict[str, str] | None) -> dict[str, Any]:
-    """Produce a JSON-schema tool definition for *func*.
-
-    Priority:
-    1. If an XML schema is available, parse it into JSON-schema.
-    2. Otherwise, infer from the function signature and docstring.
-    """
-    name = func.__name__
-
-    if xml_tools and name in xml_tools:
-        schema = _extract_json_schema_from_xml(name, xml_tools[name])
-        if schema is not None:
-            return schema
-
+def _extract_json_schema(func: Callable[..., Any]) -> dict[str, Any]:
+    """Produce a JSON-schema tool definition for *func* from its signature and docstring."""
     return _infer_json_schema_from_signature(func)
 
 
@@ -333,27 +139,6 @@ def _get_module_name(func: Callable[..., Any]) -> str:
         if len(parts) >= 1:
             return parts[0]
     return "unknown"
-
-
-def _get_schema_path(func: Callable[..., Any]) -> Path | None:
-    module = inspect.getmodule(func)
-    if not module or not module.__name__:
-        return None
-
-    module_name = module.__name__
-
-    if ".tools." not in module_name:
-        return None
-
-    parts = module_name.split(".tools.")[-1].split(".")
-    if len(parts) < 2:
-        return None
-
-    folder = parts[0]
-    file_stem = parts[1]
-    schema_file = f"{file_stem}_schema.xml"
-
-    return get_strix_resource_path("tools", folder, schema_file)
 
 
 def _is_sandbox_mode() -> bool:
@@ -422,30 +207,8 @@ def register_tool(
             "sandbox_execution": sandbox_execution,
         }
 
-        xml_tools: dict[str, str] | None = None
-        if not sandbox_mode:
-            try:
-                schema_path = _get_schema_path(f)
-                xml_tools = _load_xml_schema(schema_path) if schema_path else None
-
-                if xml_tools is not None and f.__name__ in xml_tools:
-                    func_dict["xml_schema"] = xml_tools[f.__name__]
-                else:
-                    func_dict["xml_schema"] = (
-                        f'<tool name="{f.__name__}">'
-                        "<description>Schema not found for tool.</description>"
-                        "</tool>"
-                    )
-            except (TypeError, FileNotFoundError) as e:
-                logger.warning(f"Error loading schema for {f.__name__}: {e}")
-                func_dict["xml_schema"] = (
-                    f'<tool name="{f.__name__}">'
-                    "<description>Error loading schema.</description>"
-                    "</tool>"
-                )
-
-        # --- JSON-schema extraction (new) ---
-        json_schema = _extract_json_schema(f, xml_tools)
+        # JSON-schema extraction from function signature and docstring
+        json_schema = _extract_json_schema(f)
         func_dict["json_schema"] = json_schema
 
         # Populate _tool_param_schemas with JSON-schema-based info
