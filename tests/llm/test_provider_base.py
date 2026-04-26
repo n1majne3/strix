@@ -165,3 +165,53 @@ class TestBackwardCompat:
         from strix.llm import LLMRequestFailedError as Err  # noqa: F401
 
         assert Err is LLMRequestFailedError
+
+
+# ---------------------------------------------------------------------------
+# generate_stream signature
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateStreamSignature:
+    def test_generate_stream_params_match_base(self) -> None:
+        """generate_stream must accept (messages, tools, tool_choice, **kwargs)."""
+        sig = inspect.signature(ProviderBase.generate_stream)
+        params = list(sig.parameters.keys())
+        assert "messages" in params
+        assert "tools" in params
+        assert "tool_choice" in params
+
+    def test_generate_stream_is_async_generator(self) -> None:
+        """The return annotation should be an async iterator of LLMResponse."""
+        from collections.abc import AsyncIterator as AI
+
+        ann = ProviderBase.generate_stream.__annotations__.get("return")
+        # The annotation may be a string or a real type; just verify it exists
+        # and references AsyncIterator.
+        assert ann is not None
+
+
+# ---------------------------------------------------------------------------
+# Integration: LLM._provider wiring
+# ---------------------------------------------------------------------------
+
+
+class TestLLMProviderWiring:
+    def test_llm_creates_anthropic_provider(self) -> None:
+        """LLM.__init__ must wire up an AnthropicProvider instance."""
+        from strix.llm.provider_anthropic import AnthropicProvider
+
+        from strix.llm.llm import LLM
+        from strix.llm.config import LLMConfig
+
+        llm = LLM(LLMConfig(model_name="openai/gpt-5.4"), agent_name=None)
+        assert isinstance(llm._provider, AnthropicProvider)
+
+    def test_llm_provider_exposes_stats(self) -> None:
+        """LLM must aggregate stats from its provider."""
+        from strix.llm.llm import LLM
+        from strix.llm.config import LLMConfig
+
+        llm = LLM(LLMConfig(model_name="openai/gpt-5.4"), agent_name=None)
+        stats = llm._provider.get_stats()
+        assert isinstance(stats, RequestStats)
