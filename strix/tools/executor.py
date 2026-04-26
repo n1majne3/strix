@@ -133,8 +133,11 @@ def _validate_tool_arguments(tool_name: str, kwargs: dict[str, Any]) -> str | No
     if not param_schema or not param_schema.get("has_params"):
         return None
 
-    allowed_params: set[str] = param_schema.get("params", set())
-    required_params: set[str] = param_schema.get("required", set())
+    # Properties keys come from JSON-schema "properties" dict
+    properties = param_schema.get("properties", {})
+    allowed_params: set[str] = set(properties.keys())
+    # "required" is stored as a list in JSON-schema; convert to set
+    required_params: set[str] = set(param_schema.get("required", []))
     optional_params = allowed_params - required_params
 
     schema_hint = _format_schema_hint(tool_name, required_params, optional_params)
