@@ -526,11 +526,6 @@ def get_tools_definitions() -> list[dict[str, Any]]:
     return definitions
 
 
-def get_tools_prompt() -> str:
-    """Return an empty string. Kept for backward compatibility; removed in S03."""
-    return ""
-
-
 def clear_registry() -> None:
     tools.clear()
     _tools_by_name.clear()
