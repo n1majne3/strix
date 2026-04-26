@@ -315,9 +315,7 @@ class LLM:
         conversation_history.extend(compressed)
 
         # Convert conversation history to LiteLLM-compatible format.
-        # Handles two formats:
-        # 1. Native: assistant+tool_calls followed by tool role messages (from native executor)
-        # 2. Legacy: assistant+tool_calls followed by user "Tool Results:" with XML (old executor)
+        # Handles native tool-calling: assistant+tool_calls followed by tool role messages.
         i = 0
         while i < len(compressed):
             msg = compressed[i]
@@ -341,39 +339,6 @@ class LLM:
                     "tool_calls": msg["tool_calls"],
                 }
                 messages.append(api_msg)
-
-                # Check if next message is legacy XML-format tool results (user message)
-                if i + 1 < len(compressed):
-                    next_msg = compressed[i + 1]
-                    if (
-                        next_msg.get("role") == "user"
-                        and isinstance(next_msg.get("content"), str)
-                        and "Tool Results:" in next_msg.get("content", "")
-                    ):
-                        tool_messages = self._convert_tool_results_to_tool_messages(
-                            next_msg["content"], msg["tool_calls"]
-                        )
-                        messages.extend(tool_messages)
-                        i += 2  # Skip both the assistant and the user (tool results) message
-                        continue
-                    elif (
-                        next_msg.get("role") == "user"
-                        and isinstance(next_msg.get("content"), list)
-                    ):
-                        # Handle legacy image-containing tool results
-                        text_content = ""
-                        for part in next_msg["content"]:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                text_content = part.get("text", "")
-                                break
-                        if "Tool Results:" in text_content:
-                            tool_messages = self._convert_tool_results_to_tool_messages(
-                                text_content, msg["tool_calls"]
-                            )
-                            messages.extend(tool_messages)
-                            i += 2
-                            continue
-
                 i += 1
                 continue
 
@@ -389,68 +354,6 @@ class LLM:
             messages = self._add_cache_control(messages)
 
         return messages
-
-    @staticmethod
-    def _convert_tool_results_to_tool_messages(
-        results_content: str, tool_calls: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Convert a combined tool-results user message into individual tool role messages.
-
-        The executor stores all tool results in a single user message like:
-            "Tool Results:\\n\\n<tool_result>\\n<tool_name>X</tool_name>\\n<result>...</result>\\n</tool_result>"
-
-        We split by <tool_result> blocks and match them to tool_calls by name or position.
-        """
-        import re
-
-        # Extract individual tool result blocks
-        result_blocks: list[tuple[str, str]] = []  # (tool_name, result_text)
-        pattern = re.compile(
-            r"<tool_result>\s*<tool_name>(.*?)</tool_name>\s*<result>(.*?)</result>\s*</tool_result>",
-            re.DOTALL,
-        )
-        for m in pattern.finditer(results_content):
-            result_blocks.append((m.group(1).strip(), m.group(2)))
-
-        # If no XML blocks found, use the full content as a single result
-        if not result_blocks:
-            result_blocks = [("", results_content)]
-
-        # Build tool role messages, matching by name then falling back to position
-        tool_messages: list[dict[str, Any]] = []
-        used_indices: set[int] = set()
-
-        for block_name, block_result in result_blocks:
-            matched_id = None
-
-            # Try to match by function name
-            if block_name:
-                for idx, tc in enumerate(tool_calls):
-                    if idx not in used_indices and tc.get("function", {}).get("name") == block_name:
-                        matched_id = tc["id"]
-                        used_indices.add(idx)
-                        break
-
-            # Fall back to positional matching
-            if matched_id is None:
-                for idx, tc in enumerate(tool_calls):
-                    if idx not in used_indices:
-                        matched_id = tc["id"]
-                        used_indices.add(idx)
-                        break
-
-            # Last resort: use first tool_call id
-            if matched_id is None and tool_calls:
-                matched_id = tool_calls[0]["id"]
-
-            if matched_id:
-                tool_messages.append({
-                    "role": "tool",
-                    "tool_call_id": matched_id,
-                    "content": block_result,
-                })
-
-        return tool_messages
 
     def _build_completion_args(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         if not self._supports_vision():

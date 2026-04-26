@@ -39,7 +39,6 @@ dependencies = [
   "rich",
   "docker>=7.1.0",
   "textual>=6.0.0",
-  "xmltodict>=0.13.0",
   "requests>=2.32.0",
   "cvss>=3.2",
   "traceloop-sdk>=0.53.0",

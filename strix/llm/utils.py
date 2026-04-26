@@ -11,6 +11,11 @@ _STRIP_TAG_QUOTES = re.compile(r"<(function|parameter)\s*=\s*([^>]*?)>")
 def normalize_tool_format(content: str) -> str:
     """Convert alternative tool-call XML formats to the canonical one.
 
+    **Defensive safety net against LLM text output, NOT the XML tool-calling harness.**
+    Even with native tool calling enabled, some models occasionally emit stray
+    ``<function=…>`` XML in their text content.  This function normalises those
+    fragments so ``clean_content()`` can strip them cleanly.
+
     Handles:
       <function_calls>...</function_calls>  → stripped
       <invoke name="X">                     → <function=X>
@@ -63,6 +68,11 @@ def resolve_strix_model(model_name: str | None) -> tuple[str | None, str | None]
 def fix_incomplete_tool_call(content: str) -> str:
     """Fix incomplete tool calls by adding missing closing tag.
 
+    **Defensive safety net against LLM text output, NOT the XML tool-calling harness.**
+    When a model's text output is truncated mid-tag (e.g. by a token limit),
+    this adds the missing ``</function>`` so ``clean_content()`` can remove
+    the partial block cleanly.
+
     Handles both ``<function=…>`` and ``<invoke name="…">`` formats.
     """
     has_open = "<function=" in content or "<invoke " in content
@@ -77,10 +87,12 @@ def fix_incomplete_tool_call(content: str) -> str:
 def clean_content(content: str) -> str:
     """Strip XML tool-call blocks from LLM response content.
 
-    Defensive utility: even with native tool calling, some models may still
-    emit ``<function=…>…</function>`` patterns in their text content.  This
+    **Defensive safety net against LLM text output, NOT the XML tool-calling harness.**
+    Even with native tool calling enabled, some models may still emit
+    ``<function=…>…</function>`` patterns in their text content.  This
     function removes those blocks plus hidden inter-agent XML tags so the TUI
-    only renders human-readable prose.
+    only renders human-readable prose.  Called by ``base_agent.py`` and
+    ``agent_message_renderer.py`` — do NOT remove.
     """
     if not content:
         return ""

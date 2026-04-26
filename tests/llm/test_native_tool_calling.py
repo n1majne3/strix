@@ -191,8 +191,8 @@ class TestLLMMessagePreparation:
         assert prepared[3]["tool_call_id"] == "call_123"
         assert prepared[4]["role"] == "user"
 
-    def test_legacy_xml_tool_results_converted(self, mock_llm_config):
-        """Legacy 'Tool Results:' user messages are converted to tool role messages."""
+    def test_legacy_xml_tool_results_not_converted(self, mock_llm_config):
+        """Legacy 'Tool Results:' user messages are NOT converted — passed through as-is."""
         llm = self._make_llm(mock_llm_config)
 
         tool_calls = [
@@ -224,10 +224,14 @@ class TestLLMMessagePreparation:
 
         prepared = llm._prepare_messages(history)
 
-        # Find the tool messages
+        # Legacy XML-format tool results should NOT be converted to tool role messages.
+        # They pass through as regular user messages.
         tool_msgs = [m for m in prepared if m["role"] == "tool"]
-        assert len(tool_msgs) == 1
-        assert tool_msgs[0]["tool_call_id"] == "call_legacy_1"
+        assert len(tool_msgs) == 0
+
+        # The legacy content should appear as a user message, unchanged
+        user_msgs = [m for m in prepared if m["role"] == "user"]
+        assert any("Tool Results:" in str(m.get("content", "")) for m in user_msgs)
 
     def test_regular_messages_unchanged(self, mock_llm_config):
         llm = self._make_llm(mock_llm_config)
