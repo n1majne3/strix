@@ -410,10 +410,14 @@ class BaseAgent(metaclass=AgentMeta):
         )
         if tracer:
             tracer.clear_streaming_content(self.state.agent_id)
+            tracer_metadata: dict[str, Any] = {}
+            if thinking_blocks:
+                tracer_metadata["thinking_blocks"] = thinking_blocks
             tracer.log_chat_message(
                 content=clean_content(final_response.content),
                 role="assistant",
                 agent_id=self.state.agent_id,
+                metadata=tracer_metadata if tracer_metadata else None,
             )
 
         actions = (

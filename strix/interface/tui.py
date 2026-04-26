@@ -1201,10 +1201,11 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         if args:
             for key, value in list(args.items())[:3]:
+                str_value = str(value) if value is not None else ""
                 text.append("\n  ")
                 text.append(key, style="dim")
                 text.append(": ")
-                display_value = value if len(value) <= 100 else value[:97] + "..."
+                display_value = str_value if len(str_value) <= 100 else str_value[:97] + "..."
                 text.append(display_value, style="italic" if not is_complete else None)
 
         return text
@@ -1694,21 +1695,81 @@ class StrixTUIApp(App):  # type: ignore[misc]
         content = msg_data.get("content", "")
         metadata = msg_data.get("metadata", {})
 
-        if not content:
+        renderables: list[Any] = []
+
+        # Render thinking blocks if present (extended thinking from supported models)
+        thinking_blocks = metadata.get("thinking_blocks") if metadata else None
+        if thinking_blocks and isinstance(thinking_blocks, list):
+            thinking_renderable = self._render_thinking_blocks(thinking_blocks)
+            if thinking_renderable:
+                renderables.append(thinking_renderable)
+
+        if not content and not renderables:
             return None
 
         if role == "user":
-            return UserMessageRenderer.render_simple(content)
+            if content:
+                renderables.append(UserMessageRenderer.render_simple(content))
+            if not renderables:
+                return None
+            if len(renderables) == 1:
+                return renderables[0]
+            return self._merge_renderables(renderables)
 
-        if metadata.get("interrupted"):
-            streaming_result = self._render_streaming_content(content)
-            interrupted_text = Text()
-            interrupted_text.append("\n")
-            interrupted_text.append("⚠ ", style="yellow")
-            interrupted_text.append("Interrupted by user", style="yellow dim")
-            return self._merge_renderables([streaming_result, interrupted_text])
+        if content:
+            if metadata.get("interrupted"):
+                streaming_result = self._render_streaming_content(content)
+                renderables.append(streaming_result)
+                interrupted_text = Text()
+                interrupted_text.append("\n")
+                interrupted_text.append("⚠ ", style="yellow")
+                interrupted_text.append("Interrupted by user", style="yellow dim")
+                renderables.append(interrupted_text)
+            else:
+                renderables.append(AgentMessageRenderer.render_simple(content))
 
-        return AgentMessageRenderer.render_simple(content)
+        if not renderables:
+            return None
+        if len(renderables) == 1:
+            return renderables[0]
+        return self._merge_renderables(renderables)
+
+    def _render_thinking_blocks(self, blocks: list[dict[str, Any]]) -> Any:
+        """Render extended thinking blocks with a collapsible visual style."""
+        parts: list[Text] = []
+
+        for block in blocks:
+            block_type = block.get("type", "")
+            # Anthropic-style thinking block: {"type": "thinking", "thinking": "..."}
+            # or {"type": "redacted_thinking"}
+            if block_type == "thinking":
+                thinking_text = block.get("thinking", "")
+                if thinking_text and thinking_text.strip():
+                    rendered = self._format_thinking_text(thinking_text)
+                    parts.append(rendered)
+            elif block_type == "redacted_thinking":
+                redacted = Text()
+                redacted.append("💭 ", style="dim")
+                redacted.append("[thinking redacted]", style="dim italic")
+                parts.append(redacted)
+
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        return self._merge_renderables(parts)
+
+    @staticmethod
+    def _format_thinking_text(text: str) -> Text:
+        """Format thinking text with a subtle visual treatment."""
+        rendered = Text()
+        rendered.append("💭 ", style="dim")
+        # Truncate very long thinking blocks for display
+        display_text = text.strip()
+        if len(display_text) > 500:
+            display_text = display_text[:497] + "..."
+        rendered.append(display_text, style="dim italic")
+        return rendered
 
     def _render_tool_content_simple(self, tool_data: dict[str, Any]) -> Any:
         tool_name = tool_data.get("tool_name", "Unknown Tool")
