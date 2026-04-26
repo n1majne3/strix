@@ -56,11 +56,11 @@ class StrReplaceEditorRenderer(BaseToolRenderer):
         args = tool_data.get("args", {})
         result = tool_data.get("result")
 
-        command = args.get("command", "")
-        path = args.get("path", "")
-        old_str = args.get("old_str", "")
-        new_str = args.get("new_str", "")
-        file_text = args.get("file_text", "")
+        command = args.get("command") or ""
+        path = args.get("path") or ""
+        old_str = args.get("old_str") or ""
+        new_str = args.get("new_str") or ""
+        file_text = args.get("file_text") or ""
 
         text = Text()
 
@@ -129,7 +129,7 @@ class ListFilesRenderer(BaseToolRenderer):
     @classmethod
     def render(cls, tool_data: dict[str, Any]) -> Static:
         args = tool_data.get("args", {})
-        path = args.get("path", "")
+        path = args.get("path") or ""
 
         text = Text()
         text.append("◇ ", style="#10b981")
@@ -154,8 +154,8 @@ class SearchFilesRenderer(BaseToolRenderer):
     @classmethod
     def render(cls, tool_data: dict[str, Any]) -> Static:
         args = tool_data.get("args", {})
-        path = args.get("path", "")
-        regex = args.get("regex", "")
+        path = args.get("path") or ""
+        regex = args.get("regex") or ""
 
         text = Text()
         text.append("◇ ", style="#a855f7")

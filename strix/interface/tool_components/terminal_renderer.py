@@ -130,8 +130,8 @@ class TerminalRenderer(BaseToolRenderer):
         status = tool_data.get("status", "unknown")
         result = tool_data.get("result")
 
-        command = args.get("command", "")
-        is_input = args.get("is_input", False)
+        command = args.get("command") or ""
+        is_input = args.get("is_input") or False
 
         content = cls._build_content(command, is_input, status, result)
 

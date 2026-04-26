@@ -64,7 +64,7 @@ class BrowserRenderer(BaseToolRenderer):
         args = tool_data.get("args", {})
         status = tool_data.get("status", "unknown")
 
-        action = args.get("action", "")
+        action = args.get("action") or ""
         content = cls._build_content(action, args)
 
         css_classes = cls.get_css_classes(status)
