@@ -25,6 +25,7 @@ from strix.llm.llm import LLM, LLMResponse
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import _extract_message_text, _get_message_tokens
 from strix.tools.executor import (
+    _format_tool_result,
     execute_tool_with_validation,
     process_tool_invocations,
     validate_tool_availability,
@@ -862,3 +863,251 @@ class TestBuildCompletionArgs:
         for tool_def in args["tools"]:
             assert tool_def["type"] == "function"
             assert "function" in tool_def
+
+
+# ---------------------------------------------------------------------------
+# 10. get_tools_definitions() format validation (T03 step 6)
+# ---------------------------------------------------------------------------
+
+
+class TestToolsDefinitionsFormatValidation:
+    """Deep format validation for get_tools_definitions() output.
+
+    Verifies JSON Schema compliance, type consistency, description defaults,
+    and absence of any XML remnants in definitions.
+    """
+
+    def test_json_schema_property_types_match_python_types(self):
+        """Property types in definitions should reflect Python type annotations."""
+
+        @register_tool(sandbox_execution=False)
+        def typed_tool(
+            name: str,
+            count: int,
+            ratio: float,
+            enabled: bool,
+        ) -> dict[str, Any]:
+            """A tool with various typed params."""
+            return {}
+
+        defs = get_tools_definitions()
+        func_def = next(d for d in defs if d["function"]["name"] == "typed_tool")
+        props = func_def["function"]["parameters"]["properties"]
+
+        assert props["name"]["type"] == "string"
+        assert props["count"]["type"] == "integer"
+        assert props["ratio"]["type"] == "number"
+        assert props["enabled"]["type"] == "boolean"
+
+    def test_optional_params_not_in_required(self):
+        """Parameters with defaults should not appear in the required list."""
+
+        @register_tool(sandbox_execution=False)
+        def optional_params(
+            required_arg: str,
+            optional_arg: str = "default",
+            another_optional: int = 5,
+        ) -> dict[str, Any]:
+            """Tool with optional params."""
+            return {}
+
+        defs = get_tools_definitions()
+        func_def = next(d for d in defs if d["function"]["name"] == "optional_params")
+        required = func_def["function"]["parameters"].get("required", [])
+
+        assert "required_arg" in required
+        assert "optional_arg" not in required
+        assert "another_optional" not in required
+
+    def test_description_extracted_from_docstring(self):
+        """Tool description should come from the first paragraph of the docstring."""
+
+        @register_tool(sandbox_execution=False)
+        def documented_tool(x: int) -> dict[str, Any]:
+            """This is the tool description.
+
+            This is additional detail that should not appear in the short description.
+            """
+            return {}
+
+        defs = get_tools_definitions()
+        func_def = next(d for d in defs if d["function"]["name"] == "documented_tool")
+        desc = func_def["function"]["description"]
+
+        assert desc == "This is the tool description."
+        assert "additional detail" not in desc
+
+    def test_no_xml_in_definitions(self):
+        """No XML-related keys or values should appear in tool definitions."""
+
+        @register_tool(sandbox_execution=False)
+        def xml_clean_tool(x: str) -> dict[str, Any]:
+            """A clean tool."""
+            return {}
+
+        defs = get_tools_definitions()
+        defs_str = json.dumps(defs)
+
+        assert "xml_schema" not in defs_str
+        assert "<function" not in defs_str
+        assert "</function>" not in defs_str
+        assert "<invoke" not in defs_str
+
+    def test_function_name_matches_registered_name(self):
+        """The 'name' in the function definition should match the Python function name."""
+
+        @register_tool(sandbox_execution=False)
+        def my_specific_tool(x: str) -> dict[str, Any]:
+            """A specific tool."""
+            return {}
+
+        defs = get_tools_definitions()
+        func_def = next(d for d in defs if d["function"]["name"] == "my_specific_tool")
+        assert func_def["function"]["name"] == "my_specific_tool"
+
+    def test_parameters_object_has_json_schema_required_keys(self):
+        """Each 'parameters' block must have 'type' and 'properties'."""
+
+        @register_tool(sandbox_execution=False)
+        def param_tool(x: str, y: int) -> dict[str, Any]:
+            """Tool with params."""
+            return {}
+
+        defs = get_tools_definitions()
+        func_def = next(d for d in defs if d["function"]["name"] == "param_tool")
+        params = func_def["function"]["parameters"]
+
+        assert params["type"] == "object"
+        assert isinstance(params["properties"], dict)
+        assert isinstance(params.get("required", []), list)
+
+    def test_no_args_tool_has_empty_properties(self):
+        """A tool with no args should produce empty properties dict."""
+
+        @register_tool(sandbox_execution=False)
+        def no_args_here() -> dict[str, Any]:
+            """No arguments at all."""
+            return {}
+
+        defs = get_tools_definitions()
+        func_def = next(d for d in defs if d["function"]["name"] == "no_args_here")
+        params = func_def["function"]["parameters"]
+
+        assert params["properties"] == {}
+        assert "required" not in params or params["required"] == []
+
+
+# ---------------------------------------------------------------------------
+# 11. Tool result message format validation (T03 step 7)
+# ---------------------------------------------------------------------------
+
+
+class TestToolResultMessageFormat:
+    """Validate the exact format of tool result messages produced by _format_tool_result."""
+
+    def test_basic_string_result_format(self):
+        """String result produces a tool role message with string content."""
+        msg, images = _format_tool_result("test_tool", "hello world", "call_fmt_1")
+
+        assert msg["role"] == "tool"
+        assert msg["tool_call_id"] == "call_fmt_1"
+        assert msg["content"] == "hello world"
+        assert images == []
+
+    def test_dict_result_converted_to_string(self):
+        """Dict result is stringified in the content field."""
+        result = {"success": True, "data": [1, 2, 3]}
+        msg, images = _format_tool_result("test_tool", result, "call_dict_1")
+
+        assert msg["role"] == "tool"
+        assert msg["tool_call_id"] == "call_dict_1"
+        assert isinstance(msg["content"], str)
+        assert "success" in msg["content"]
+
+    def test_none_result_gets_default_message(self):
+        """None result produces a descriptive message instead of 'None'."""
+        msg, images = _format_tool_result("my_tool", None, "call_none_1")
+
+        assert msg["role"] == "tool"
+        assert msg["tool_call_id"] == "call_none_1"
+        assert "my_tool" in msg["content"]
+        assert msg["content"] != "None"
+        assert "executed successfully" in msg["content"]
+
+    def test_large_result_is_truncated(self):
+        """Results exceeding 10000 chars are truncated with a marker."""
+        large_result = "x" * 15000
+        msg, _images = _format_tool_result("big_tool", large_result, "call_big_1")
+
+        assert msg["role"] == "tool"
+        assert len(msg["content"]) < 15000
+        assert "truncated" in msg["content"].lower()
+        # Should preserve start and end
+        assert msg["content"].startswith("xxx")
+        assert msg["content"].endswith("xxx")
+
+    def test_tool_call_id_preserved_exactly(self):
+        """The tool_call_id in the message must match exactly what was passed."""
+        tc_id = "call_abc123_def456"
+        msg, _ = _format_tool_result("tool", "result", tc_id)
+
+        assert msg["tool_call_id"] == tc_id
+
+    def test_screenshot_extraction_creates_multipart_content(self):
+        """Results with screenshot data produce multipart content blocks."""
+        result = {"text": "page loaded", "screenshot": "base64imagedata"}
+        msg, images = _format_tool_result("browser_tool", result, "call_ss_1")
+
+        assert msg["role"] == "tool"
+        assert msg["tool_call_id"] == "call_ss_1"
+        # Content should be multipart (list of content blocks)
+        assert isinstance(msg["content"], list)
+        text_blocks = [b for b in msg["content"] if b["type"] == "text"]
+        image_blocks = [b for b in msg["content"] if b["type"] == "image_url"]
+        assert len(text_blocks) >= 1
+        assert len(image_blocks) == 1
+        # Images returned separately
+        assert len(images) == 1
+        assert "base64imagedata" in images[0]["image_url"]["url"]
+
+    def test_error_string_still_produces_tool_message(self):
+        """Error strings from tools should still be valid tool role messages."""
+        error_result = "Error: tool execution failed"
+        msg, _ = _format_tool_result("failing_tool", error_result, "call_err_fmt")
+
+        assert msg["role"] == "tool"
+        assert msg["tool_call_id"] == "call_err_fmt"
+        assert "Error" in msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_executor_appends_tool_messages_in_order(self):
+        """process_tool_invocations appends tool messages preserving invocation order."""
+        _register_test_tools()
+
+        invocations = [
+            {"toolName": "echo", "args": {"text": "first"}, "id": "call_order_1"},
+            {"toolName": "echo", "args": {"text": "second"}, "id": "call_order_2"},
+            {"toolName": "echo", "args": {"text": "third"}, "id": "call_order_3"},
+        ]
+
+        history = [
+            {"role": "user", "content": "Test"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_order_1", "type": "function", "function": {"name": "echo", "arguments": '{"text": "first"}'}},
+                {"id": "call_order_2", "type": "function", "function": {"name": "echo", "arguments": '{"text": "second"}'}},
+                {"id": "call_order_3", "type": "function", "function": {"name": "echo", "arguments": '{"text": "third"}'}},
+            ]},
+        ]
+
+        await process_tool_invocations(invocations, history)
+
+        tool_msgs = [m for m in history if m["role"] == "tool"]
+        assert len(tool_msgs) == 3
+        # Order preserved
+        assert "first" in str(tool_msgs[0]["content"])
+        assert "second" in str(tool_msgs[1]["content"])
+        assert "third" in str(tool_msgs[2]["content"])
+        # tool_call_id matches
+        assert tool_msgs[0]["tool_call_id"] == "call_order_1"
+        assert tool_msgs[1]["tool_call_id"] == "call_order_2"
+        assert tool_msgs[2]["tool_call_id"] == "call_order_3"
