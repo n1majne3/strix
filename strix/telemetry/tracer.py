@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import threading
@@ -59,6 +61,7 @@ class Tracer:
         self.chat_messages: list[dict[str, Any]] = []
         self.streaming_content: dict[str, str] = {}
         self.interrupted_content: dict[str, str] = {}
+        self._streaming_accumulators: dict[str, StreamingAccumulator] = {}
 
         self.vulnerability_reports: list[dict[str, Any]] = []
         self.final_scan_result: str | None = None
@@ -825,11 +828,59 @@ class Tracer:
             "total_tokens": total_stats["input_tokens"] + total_stats["output_tokens"],
         }
 
-    def update_streaming_content(self, agent_id: str, content: str) -> None:
+    def update_streaming_content(
+        self,
+        agent_id: str,
+        content: str,
+        tool_states: dict[int, dict[str, str]] | None = None,
+    ) -> None:
+        """Update streaming state for *agent_id*.
+
+        When *tool_states* is provided the internal ``StreamingAccumulator``
+        is used so the TUI can render tool calls forming in real-time.
+        Otherwise the plain-text fallback path is used.
+        """
         self.streaming_content[agent_id] = content
+
+        if tool_states is not None:
+            # Rebuild accumulator from accumulated data
+            acc = self._get_or_create_accumulator(agent_id)
+            acc.text_content = content
+            # Reconstruct tool-call states in the accumulator
+            acc._tool_calls.clear()  # noqa: SLF001
+            for idx, state in sorted(tool_states.items()):
+                from strix.interface.streaming_parser import _ToolCallState
+
+                tc = _ToolCallState(
+                    id=state.get("id", ""),
+                    name=state.get("name", ""),
+                    arguments_json=state.get("arguments", ""),
+                )
+                acc._tool_calls[idx] = tc  # noqa: SLF001
+
+    def _get_or_create_accumulator(self, agent_id: str) -> "StreamingAccumulator":
+        from strix.interface.streaming_parser import StreamingAccumulator
+
+        if agent_id not in self._streaming_accumulators:
+            self._streaming_accumulators[agent_id] = StreamingAccumulator()
+        return self._streaming_accumulators[agent_id]
+
+    def get_streaming_segments(self, agent_id: str) -> "list[StreamSegment]":
+        """Return current streaming segments for the TUI."""
+        from strix.interface.streaming_parser import StreamSegment
+
+        acc = self._streaming_accumulators.get(agent_id)
+        if acc is not None and acc.has_content:
+            return acc.get_segments()
+        # Fallback: plain text only
+        text = self.streaming_content.get(agent_id)
+        if text and text.strip():
+            return [StreamSegment(type="text", content=text)]
+        return []
 
     def clear_streaming_content(self, agent_id: str) -> None:
         self.streaming_content.pop(agent_id, None)
+        self._streaming_accumulators.pop(agent_id, None)
 
     def get_streaming_content(self, agent_id: str) -> str | None:
         return self.streaming_content.get(agent_id)

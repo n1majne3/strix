@@ -369,8 +369,12 @@ class BaseAgent(metaclass=AgentMeta):
 
         async for response in self.llm.generate(self.state.get_conversation_history()):
             final_response = response
-            if tracer and response.content:
-                tracer.update_streaming_content(self.state.agent_id, response.content)
+            if tracer:
+                tracer.update_streaming_content(
+                    self.state.agent_id,
+                    response.content or "",
+                    tool_states=response.streaming_tool_states,
+                )
 
         if final_response is None:
             return False

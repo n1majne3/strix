@@ -29,7 +29,7 @@ from textual.widgets import Button, Label, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
 from strix.agents.StrixAgent import StrixAgent
-from strix.interface.streaming_parser import parse_streaming_content
+from strix.interface.streaming_parser import StreamSegment
 from strix.interface.tool_components.agent_message_renderer import AgentMessageRenderer
 from strix.interface.tool_components.registry import get_tool_renderer
 from strix.interface.tool_components.user_message_renderer import UserMessageRenderer
@@ -975,15 +975,15 @@ class StrixTUIApp(App):  # type: ignore[misc]
             )
 
         events = self._gather_agent_events(self.selected_agent_id)
-        streaming = self.tracer.get_streaming_content(self.selected_agent_id)
+        streaming_segments = self.tracer.get_streaming_segments(self.selected_agent_id)
 
-        if not events and not streaming:
+        if not events and not streaming_segments:
             return self._get_chat_placeholder_content(
                 "Starting agent...", "placeholder-no-activity"
             )
 
         current_event_ids = [e["id"] for e in events]
-        current_streaming_len = len(streaming) if streaming else 0
+        current_streaming_len = len(streaming_segments)
         last_streaming_len = self._last_streaming_len.get(self.selected_agent_id, 0)
 
         if (
@@ -1103,9 +1103,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 renderables.append(content)
 
         if self.selected_agent_id:
-            streaming = self.tracer.get_streaming_content(self.selected_agent_id)
-            if streaming:
-                streaming_text = self._render_streaming_content(streaming)
+            streaming_segments = self.tracer.get_streaming_segments(self.selected_agent_id)
+            if streaming_segments:
+                streaming_text = self._render_streaming_segments(streaming_segments)
                 if streaming_text:
                     if renderables:
                         renderables.append(Text(""))
@@ -1119,17 +1119,20 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         return self._merge_renderables(renderables)
 
-    def _render_streaming_content(self, content: str, agent_id: str | None = None) -> Any:
+    def _render_streaming_segments(
+        self, segments: list[StreamSegment], agent_id: str | None = None
+    ) -> Any:
+        """Render a list of :class:`StreamSegment` objects for the chat view."""
         cache_key = agent_id or self.selected_agent_id or ""
-        content_len = len(content)
+        # Cache key uses a stable fingerprint of the segments
+        content_fingerprint = sum(len(s.content) + s.is_complete for s in segments)
 
         if cache_key in self._streaming_render_cache:
-            cached_len, cached_output = self._streaming_render_cache[cache_key]
-            if cached_len == content_len:
+            cached_fp, cached_output = self._streaming_render_cache[cache_key]
+            if cached_fp == content_fingerprint:
                 return cached_output
 
         renderables: list[Any] = []
-        segments = parse_streaming_content(content)
 
         for segment in segments:
             if segment.type == "text":
@@ -1155,8 +1158,16 @@ class StrixTUIApp(App):  # type: ignore[misc]
         else:
             result = self._merge_renderables(renderables)
 
-        self._streaming_render_cache[cache_key] = (content_len, result)
+        self._streaming_render_cache[cache_key] = (content_fingerprint, result)
         return result
+
+    def _render_streaming_content(self, content: str, agent_id: str | None = None) -> Any:
+        """Legacy text-only streaming renderer — kept for interrupted content."""
+        if not content or not content.strip():
+            return Text()
+
+        text_content = AgentMessageRenderer.render_simple(content)
+        return text_content
 
     def _render_streaming_tool(
         self, tool_name: str, args: dict[str, str], is_complete: bool
@@ -1438,8 +1449,8 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 if tool_name not in initial_tools:
                     return True
 
-        streaming = self.tracer.get_streaming_content(agent_id)
-        return bool(streaming and streaming.strip())
+        segments = self.tracer.get_streaming_segments(agent_id)
+        return bool(segments)
 
     def _agent_vulnerability_count(self, agent_id: str) -> int:
         count = 0

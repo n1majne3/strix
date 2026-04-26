@@ -37,6 +37,11 @@ class LLMResponse:
     tool_invocations: list[dict[str, Any]] | None = None
     tool_calls: list[dict[str, Any]] | None = None
     thinking_blocks: list[dict[str, Any]] | None = None
+    # Partial tool-call state during streaming.  Maps tool-call index →
+    # ``{"id": str, "name": str, "arguments": str}`` where *arguments* is
+    # the raw accumulated JSON fragment.  ``None`` when no tool-call data
+    # has been seen yet on this response.
+    streaming_tool_states: dict[int, dict[str, str]] | None = None
 
 
 @dataclass
@@ -173,6 +178,11 @@ class LLM:
         chunks: list[Any] = []
         done_streaming = 0
 
+        # Track partial tool-call state during streaming so the TUI can
+        # render tool calls forming in real-time.
+        tool_call_states: dict[int, dict[str, str]] = {}
+        has_tool_call_data = False
+
         self._total_stats.requests += 1
         response = await acompletion(**self._build_completion_args(messages), stream=True)
 
@@ -183,10 +193,43 @@ class LLM:
                 if getattr(chunk, "usage", None) or done_streaming > 5:
                     break
                 continue
-            delta = self._get_chunk_content(chunk)
-            if delta:
-                accumulated += delta
-                yield LLMResponse(content=accumulated)
+
+            # Extract text delta
+            text_delta = self._get_chunk_content(chunk)
+            if text_delta:
+                accumulated += text_delta
+
+            # Extract tool-call deltas from this chunk
+            raw_delta = None
+            if chunk.choices and hasattr(chunk.choices[0], "delta"):
+                raw_delta = chunk.choices[0].delta
+
+            tc_deltas = getattr(raw_delta, "tool_calls", None) if raw_delta else None
+            if tc_deltas:
+                has_tool_call_data = True
+                for tc in tc_deltas:
+                    idx = getattr(tc, "index", 0)
+                    if idx not in tool_call_states:
+                        tool_call_states[idx] = {"id": "", "name": "", "arguments": ""}
+                    state = tool_call_states[idx]
+                    tc_id = getattr(tc, "id", None)
+                    if tc_id:
+                        state["id"] = tc_id
+                    func = getattr(tc, "function", None)
+                    if func is not None:
+                        name = getattr(func, "name", None)
+                        if name:
+                            state["name"] = name
+                        arguments = getattr(func, "arguments", None)
+                        if arguments:
+                            state["arguments"] += arguments
+
+            # Yield intermediate response if there's new content or tool data
+            if text_delta or tc_deltas:
+                yield LLMResponse(
+                    content=accumulated,
+                    streaming_tool_states=dict(tool_call_states) if has_tool_call_data else None,
+                )
 
         # Build the complete response from chunks for metadata extraction
         built_response = None
