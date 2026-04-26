@@ -234,6 +234,7 @@ class LLM:
                     tool_invocations.append({
                         "toolName": tc.function.name,
                         "args": args,
+                        "id": tc.id,
                     })
 
         # Use content from accumulated streaming text, or from the built response
@@ -272,25 +273,34 @@ class LLM:
         conversation_history.extend(compressed)
 
         # Convert conversation history to LiteLLM-compatible format.
-        # The internal history stores assistant messages with native tool_calls
-        # and tool results as user messages.  We convert these to the format
-        # LiteLLM expects: assistant messages with tool_calls → tool role messages.
+        # Handles two formats:
+        # 1. Native: assistant+tool_calls followed by tool role messages (from native executor)
+        # 2. Legacy: assistant+tool_calls followed by user "Tool Results:" with XML (old executor)
         i = 0
         while i < len(compressed):
             msg = compressed[i]
 
+            # Tool role messages — pass through with tool_call_id intact
+            if msg.get("role") == "tool":
+                api_msg: dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": msg.get("tool_call_id", ""),
+                    "content": msg.get("content", ""),
+                }
+                messages.append(api_msg)
+                i += 1
+                continue
+
             # Assistant message with native tool_calls → include tool_calls for API
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                api_msg: dict[str, Any] = {
+                api_msg = {
                     "role": "assistant",
                     "content": msg.get("content") or None,
                     "tool_calls": msg["tool_calls"],
                 }
-                # Strip internal-only keys (thinking_blocks) that LiteLLM doesn't expect
                 messages.append(api_msg)
 
-                # Next message should be tool results (stored as user message).
-                # Convert to individual tool role messages with matching tool_call_ids.
+                # Check if next message is legacy XML-format tool results (user message)
                 if i + 1 < len(compressed):
                     next_msg = compressed[i + 1]
                     if (
@@ -308,7 +318,7 @@ class LLM:
                         next_msg.get("role") == "user"
                         and isinstance(next_msg.get("content"), list)
                     ):
-                        # Handle image-containing tool results
+                        # Handle legacy image-containing tool results
                         text_content = ""
                         for part in next_msg["content"]:
                             if isinstance(part, dict) and part.get("type") == "text":

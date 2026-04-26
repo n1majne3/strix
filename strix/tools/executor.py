@@ -1,4 +1,5 @@
 import inspect
+import json
 import os
 from typing import Any
 
@@ -224,7 +225,15 @@ def _update_tracer_with_result(
         raise
 
 
-def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str, Any]]]:
+def _format_tool_result(
+    tool_name: str, result: Any, tool_call_id: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Format a tool result as a native tool role message for LiteLLM.
+
+    Returns a tuple of (tool_result_message, images) where:
+    - tool_result_message is {"role": "tool", "tool_call_id": ..., "content": ...}
+    - images is a list of image content blocks (empty for non-screenshot results)
+    """
     images: list[dict[str, Any]] = []
 
     screenshot_data = extract_screenshot_from_result(result)
@@ -248,12 +257,20 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
             end_part = final_result_str[-4000:]
             final_result_str = start_part + "\n\n... [middle content truncated] ...\n\n" + end_part
 
-    observation_xml = (
-        f"<tool_result>\n<tool_name>{tool_name}</tool_name>\n"
-        f"<result>{final_result_str}</result>\n</tool_result>"
-    )
+    # Build content: multi-part for images, plain string otherwise
+    if images:
+        content: Any = [{"type": "text", "text": final_result_str}]
+        content.extend(images)
+    else:
+        content = final_result_str
 
-    return observation_xml, images
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+    }
+
+    return tool_message, images
 
 
 async def _execute_single_tool(
@@ -261,8 +278,14 @@ async def _execute_single_tool(
     agent_state: Any | None,
     tracer: Any | None,
     agent_id: str,
-) -> tuple[str, list[dict[str, Any]], bool]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+    """Execute a single tool invocation and return a native tool role message.
+
+    Returns (tool_result_message, images, should_agent_finish) where:
+    - tool_result_message is {"role": "tool", "tool_call_id": ..., "content": ...}
+    """
     tool_name = tool_inv.get("toolName", "unknown")
+    tool_call_id = tool_inv.get("id", f"{tool_name}_{id(tool_inv)}")
     args = tool_inv.get("args", {})
     execution_id = None
     should_agent_finish = False
@@ -293,8 +316,8 @@ async def _execute_single_tool(
             tracer.update_tool_execution(execution_id, "error", error_msg)
         raise
 
-    observation_xml, images = _format_tool_result(tool_name, result)
-    return observation_xml, images, should_agent_finish
+    tool_message, images = _format_tool_result(tool_name, result, tool_call_id)
+    return tool_message, images, should_agent_finish
 
 
 def _get_tracer_and_agent_id(agent_state: Any | None) -> tuple[Any | None, str]:
@@ -315,29 +338,47 @@ async def process_tool_invocations(
     conversation_history: list[dict[str, Any]],
     agent_state: Any | None = None,
 ) -> bool:
-    observation_parts: list[str] = []
-    all_images: list[dict[str, Any]] = []
+    """Execute tool invocations and append native tool role messages to conversation history.
+
+    For each tool invocation:
+    1. Executes the tool
+    2. Formats the result as a {"role": "tool", "tool_call_id": ..., "content": ...} message
+
+    Also ensures the preceding assistant message carries `tool_calls` metadata
+    so LiteLLM can match tool results to the originating tool calls.
+    """
     should_agent_finish = False
 
     tracer, agent_id = _get_tracer_and_agent_id(agent_state)
 
+    # Ensure the last assistant message has tool_calls metadata for LiteLLM.
+    # Reconstruct the OpenAI-format tool_calls from the invocations (which now carry `id`).
+    if tool_invocations and conversation_history:
+        last_msg = conversation_history[-1]
+        if last_msg.get("role") == "assistant" and not last_msg.get("tool_calls"):
+            reconstructed_calls: list[dict[str, Any]] = []
+            for inv in tool_invocations:
+                tc_id = inv.get("id", f"{inv.get('toolName', 'unknown')}_{id(inv)}")
+                reconstructed_calls.append({
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": inv.get("toolName", "unknown"),
+                        "arguments": json.dumps(inv.get("args", {})),
+                    },
+                })
+            last_msg["tool_calls"] = reconstructed_calls
+
     for tool_inv in tool_invocations:
-        observation_xml, images, tool_should_finish = await _execute_single_tool(
+        tool_message, _images, tool_should_finish = await _execute_single_tool(
             tool_inv, agent_state, tracer, agent_id
         )
-        observation_parts.append(observation_xml)
-        all_images.extend(images)
+
+        # Append each tool result as its own tool role message
+        conversation_history.append(tool_message)
 
         if tool_should_finish:
             should_agent_finish = True
-
-    if all_images:
-        content = [{"type": "text", "text": "Tool Results:\n\n" + "\n\n".join(observation_parts)}]
-        content.extend(all_images)
-        conversation_history.append({"role": "user", "content": content})
-    else:
-        observation_content = "Tool Results:\n\n" + "\n\n".join(observation_parts)
-        conversation_history.append({"role": "user", "content": observation_content})
 
     return should_agent_finish
 
