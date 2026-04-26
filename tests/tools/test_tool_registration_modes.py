@@ -1,94 +1,117 @@
-import importlib
+"""Tests for tool registration modes (sandbox vs non-sandbox).
+
+Each test runs in an isolated subprocess to avoid module-cache pollution
+and import deadlocks from reloading ``strix.tools`` at runtime.
+"""
+
+import json
+import subprocess
 import sys
-from types import ModuleType
-from typing import Any
+
+
+def _run_in_subprocess(code: str) -> subprocess.CompletedProcess[str]:
+    """Execute *code* in a fresh Python process and return the result."""
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env={**__import__("os").environ},
+    )
+
+
+def test_non_sandbox_registers_agents_graph_but_not_browser_or_web_search_when_disabled() -> None:
+    result = _run_in_subprocess(
+        """
+import os
+os.environ["STRIX_SANDBOX_MODE"] = "false"
+os.environ["STRIX_DISABLE_BROWSER"] = "true"
+os.environ.pop("PERPLEXITY_API_KEY", None)
 
 from strix.config import Config
-from strix.tools.registry import clear_registry
+Config.load = classmethod(lambda _cls: {"env": {}})
 
-
-def _empty_config_load(_cls: type[Config]) -> dict[str, dict[str, str]]:
-    return {"env": {}}
-
-
-def _reload_tools_module() -> ModuleType:
-    clear_registry()
-
-    for name in list(sys.modules):
-        if name == "strix.tools" or name.startswith("strix.tools."):
-            sys.modules.pop(name, None)
-
-    return importlib.import_module("strix.tools")
-
-
-def test_non_sandbox_registers_agents_graph_but_not_browser_or_web_search_when_disabled(
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setenv("STRIX_SANDBOX_MODE", "false")
-    monkeypatch.setenv("STRIX_DISABLE_BROWSER", "true")
-    monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-    monkeypatch.setattr(Config, "load", classmethod(_empty_config_load))
-
-    tools = _reload_tools_module()
-    names = set(tools.get_tool_names())
-
-    assert "create_agent" in names
-    assert "browser_action" not in names
-    assert "web_search" not in names
-
-
-def test_sandbox_registers_sandbox_tools_but_not_non_sandbox_tools(
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setenv("STRIX_SANDBOX_MODE", "true")
-    monkeypatch.setenv("STRIX_DISABLE_BROWSER", "true")
-    monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-    monkeypatch.setattr(Config, "load", classmethod(_empty_config_load))
-
-    tools = _reload_tools_module()
-    names = set(tools.get_tool_names())
-
-    assert "terminal_execute" in names
-    assert "python_action" in names
-    assert "list_requests" in names
-    assert "create_agent" not in names
-    assert "finish_scan" not in names
-    assert "load_skill" not in names
-    assert "browser_action" not in names
-    assert "web_search" not in names
-
-
-def test_load_skill_import_does_not_register_create_agent_in_sandbox(
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setenv("STRIX_SANDBOX_MODE", "true")
-    monkeypatch.setenv("STRIX_DISABLE_BROWSER", "true")
-    monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-    monkeypatch.setattr(Config, "load", classmethod(_empty_config_load))
-
-    clear_registry()
-    for name in list(sys.modules):
-        if name == "strix.tools" or name.startswith("strix.tools."):
-            sys.modules.pop(name, None)
-
-    load_skill_module = importlib.import_module("strix.tools.load_skill.load_skill_actions")
-    registry = importlib.import_module("strix.tools.registry")
-
-    names_before = set(registry.get_tool_names())
-    assert "load_skill" not in names_before
-    assert "create_agent" not in names_before
-
-    state_type = type(
-        "DummyState",
-        (),
-        {
-            "agent_id": "agent_test",
-            "context": {},
-            "update_context": lambda self, key, value: self.context.__setitem__(key, value),
-        },
+from strix.tools import get_tool_names
+names = set(get_tool_names())
+import json, sys
+json.dump({"names": sorted(names)}, sys.stdout)
+"""
     )
-    result = load_skill_module.load_skill(state_type(), "nmap")
+    assert result.returncode == 0, f"subprocess failed: {result.stderr}"
+    data = json.loads(result.stdout)
+    names = set(data["names"])
+    assert "create_agent" in names, f"Expected create_agent, got: {sorted(names)}"
+    assert "browser_action" not in names, f"browser_action should not be registered, got: {sorted(names)}"
+    assert "web_search" not in names, f"web_search should not be registered, got: {sorted(names)}"
 
-    names_after = set(registry.get_tool_names())
-    assert "create_agent" not in names_after
-    assert result["success"] is False
+
+def test_sandbox_registers_sandbox_tools_but_not_non_sandbox_tools() -> None:
+    result = _run_in_subprocess(
+        """
+import os
+os.environ["STRIX_SANDBOX_MODE"] = "true"
+os.environ["STRIX_DISABLE_BROWSER"] = "true"
+os.environ.pop("PERPLEXITY_API_KEY", None)
+
+from strix.config import Config
+Config.load = classmethod(lambda _cls: {"env": {}})
+
+from strix.tools import get_tool_names
+names = set(get_tool_names())
+import json, sys
+json.dump({"names": sorted(names)}, sys.stdout)
+"""
+    )
+    assert result.returncode == 0, f"subprocess failed: {result.stderr}"
+    data = json.loads(result.stdout)
+    names = set(data["names"])
+    assert "terminal_execute" in names, f"Expected terminal_execute, got: {sorted(names)}"
+    assert "python_action" in names, f"Expected python_action, got: {sorted(names)}"
+    assert "list_requests" in names, f"Expected list_requests, got: {sorted(names)}"
+    assert "create_agent" not in names, f"create_agent should not be registered, got: {sorted(names)}"
+    assert "finish_scan" not in names, f"finish_scan should not be registered, got: {sorted(names)}"
+    assert "load_skill" not in names, f"load_skill should not be registered, got: {sorted(names)}"
+    assert "browser_action" not in names, f"browser_action should not be registered, got: {sorted(names)}"
+    assert "web_search" not in names, f"web_search should not be registered, got: {sorted(names)}"
+
+
+def test_load_skill_import_does_not_register_create_agent_in_sandbox() -> None:
+    result = _run_in_subprocess(
+        """
+import os
+os.environ["STRIX_SANDBOX_MODE"] = "true"
+os.environ["STRIX_DISABLE_BROWSER"] = "true"
+os.environ.pop("PERPLEXITY_API_KEY", None)
+
+from strix.config import Config
+Config.load = classmethod(lambda _cls: {"env": {}})
+
+from strix.tools.registry import clear_registry, get_tool_names
+
+clear_registry()
+names_before = set(get_tool_names())
+
+from strix.tools.load_skill import load_skill_actions
+
+class DummyState:
+    agent_id = "agent_test"
+    context = {}
+    def update_context(self, key, value):
+        self.context[key] = value
+
+result = load_skill_actions.load_skill(DummyState(), "nmap")
+names_after = set(get_tool_names())
+
+import json, sys
+json.dump({
+    "names_before": sorted(names_before),
+    "names_after": sorted(names_after),
+    "result_success": result["success"],
+}, sys.stdout)
+"""
+    )
+    assert result.returncode == 0, f"subprocess failed: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert "load_skill" not in data["names_before"]
+    assert "create_agent" not in data["names_before"]
+    assert "create_agent" not in data["names_after"]
+    assert data["result_success"] is False
