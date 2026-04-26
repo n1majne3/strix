@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 
+from unittest.mock import patch
+
 import pytest
 
 from strix.llm.provider_base import (
@@ -42,6 +44,7 @@ class TestProviderBaseIsAbstract:
             "supports_prompt_caching",
             "get_stats",
             "get_model_name",
+            "should_retry",
         }
         assert abstract_names == expected
 
@@ -66,6 +69,9 @@ class TestProviderBaseIsAbstract:
 
             def get_model_name(self) -> str:
                 return "stub"
+
+            def should_retry(self, exc: Exception) -> bool:
+                return False
 
         provider = StubProvider()
         assert provider.get_model_name() == "stub"
@@ -197,17 +203,29 @@ class TestGenerateStreamSignature:
 
 
 class TestLLMProviderWiring:
-    def test_llm_creates_anthropic_provider(self) -> None:
-        """LLM.__init__ must wire up an AnthropicProvider instance."""
+    def test_llm_routes_anthropic_by_default(self) -> None:
+        """LLM.__init__ must route non-openai models to AnthropicProvider."""
         from strix.llm.provider_anthropic import AnthropicProvider
 
         from strix.llm.llm import LLM
         from strix.llm.config import LLMConfig
 
-        llm = LLM(LLMConfig(model_name="openai/gpt-5.4"), agent_name=None)
+        llm = LLM(LLMConfig(model_name="claude-sonnet-4-20250514"), agent_name=None)
         assert isinstance(llm._provider, AnthropicProvider)
 
-    def test_llm_provider_exposes_stats(self) -> None:
+    @patch("strix.llm.provider_openai.AsyncOpenAI")
+    def test_llm_routes_openai_prefix(self, mock_async_openai) -> None:
+        """LLM.__init__ must route openai/ models to OpenAIProvider."""
+        from strix.llm.provider_openai import OpenAIProvider
+
+        from strix.llm.llm import LLM
+        from strix.llm.config import LLMConfig
+
+        llm = LLM(LLMConfig(model_name="openai/gpt-5.4"), agent_name=None)
+        assert isinstance(llm._provider, OpenAIProvider)
+
+    @patch("strix.llm.provider_openai.AsyncOpenAI")
+    def test_llm_provider_exposes_stats(self, mock_async_openai) -> None:
         """LLM must aggregate stats from its provider."""
         from strix.llm.llm import LLM
         from strix.llm.config import LLMConfig

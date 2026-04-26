@@ -101,3 +101,7 @@ class ProviderBase(ABC):
     @abstractmethod
     def get_model_name(self) -> str:
         """Return the model identifier used by this provider."""
+
+    @abstractmethod
+    def should_retry(self, exc: Exception) -> bool:
+        """Return True if *exc* is retryable (rate-limit, server error, etc.)."""

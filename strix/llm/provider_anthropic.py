@@ -13,7 +13,6 @@ from litellm.utils import supports_prompt_caching, supports_vision
 
 from strix.llm.config import LLMConfig
 from strix.llm.provider_base import LLMResponse, ProviderBase, RequestStats
-from strix.tools.registry import get_tools_definitions
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +54,7 @@ class AnthropicProvider(ProviderBase):
 
         self._stats.requests += 1
 
-        args = self.build_completion_args(messages)
+        args = self.build_completion_args(messages, tools, tool_choice)
         response = await acompletion(**args, stream=True)
 
         async for chunk in response:
@@ -195,7 +194,12 @@ class AnthropicProvider(ProviderBase):
     # Anthropic-specific helpers (public for testability)
     # ------------------------------------------------------------------
 
-    def build_completion_args(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def build_completion_args(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: str,
+    ) -> dict[str, Any]:
         """Build the litellm ``acompletion`` keyword arguments."""
         if not self.supports_vision():
             messages = self._strip_images(messages)
@@ -205,8 +209,8 @@ class AnthropicProvider(ProviderBase):
             "messages": messages,
             "timeout": self._config.timeout,
             "stream_options": {"include_usage": True},
-            "tools": get_tools_definitions(),
-            "tool_choice": "auto",
+            "tools": tools,
+            "tool_choice": tool_choice,
         }
 
         if self._config.api_key:

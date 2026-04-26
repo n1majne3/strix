@@ -8,12 +8,25 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from strix.config import Config
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
-from strix.llm.provider_anthropic import AnthropicProvider
 from strix.llm.provider_base import LLMRequestFailedError, LLMResponse, RequestStats
 from strix.skills import load_skills
 from strix.utils.resource_paths import get_strix_resource_path
 
 logger = logging.getLogger(__name__)
+
+
+def get_provider(config: LLMConfig, reasoning_effort: str) -> "ProviderBase":
+    """Return the appropriate provider based on canonical model name."""
+    from strix.llm.provider_anthropic import AnthropicProvider
+    from strix.llm.provider_openai import OpenAIProvider
+
+    from strix.llm.provider_base import ProviderBase
+
+    canonical = config.canonical_model or ""
+    if canonical.startswith("openai/"):
+        return OpenAIProvider(config, reasoning_effort)
+    # Default to Anthropic (covers anthropic/ and any unrecognized prefix)
+    return AnthropicProvider(config, reasoning_effort)
 
 
 class LLM:
@@ -39,7 +52,13 @@ class LLM:
         else:
             self._reasoning_effort = "high"
 
-        self._provider = AnthropicProvider(config, self._reasoning_effort)
+        self._provider = get_provider(config, self._reasoning_effort)
+        logger.info(
+            "Provider selected: %s for model %s (canonical=%s)",
+            type(self._provider).__name__,
+            config.model_name,
+            config.canonical_model,
+        )
 
     def _load_system_prompt(self, agent_name: str | None) -> str:
         if not agent_name:
@@ -130,11 +149,13 @@ class LLM:
                 await asyncio.sleep(wait)
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[LLMResponse]:
+        from strix.tools.registry import get_tools_definitions
+
         if self._provider.supports_prompt_caching():
             messages = self._provider.prepare_messages(messages)
         async for response in self._provider.generate_stream(
             messages=messages,
-            tools=[],
+            tools=get_tools_definitions(),
             tool_choice="auto",
         ):
             yield response

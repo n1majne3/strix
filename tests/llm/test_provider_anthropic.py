@@ -234,7 +234,9 @@ class TestBuildCompletionArgs:
     @patch("strix.llm.provider_anthropic.supports_vision")
     def test_basic_args_structure(self, mock_sv, provider):
         mock_sv.return_value = True
-        args = provider.build_completion_args([{"role": "user", "content": "hi"}])
+        args = provider.build_completion_args(
+            [{"role": "user", "content": "hi"}], tools=[], tool_choice="auto"
+        )
         assert args["model"] == "anthropic/claude-sonnet-4-20250514"
         assert args["timeout"] == 300
         assert args["tool_choice"] == "auto"
@@ -254,7 +256,7 @@ class TestBuildCompletionArgs:
                 ],
             }
         ]
-        args = prov.build_completion_args(messages)
+        args = prov.build_completion_args(messages, tools=[], tool_choice="auto")
         # Messages passed to args should have images stripped
         assert "[Image removed" in args["messages"][0]["content"]
 
@@ -262,13 +264,17 @@ class TestBuildCompletionArgs:
     def test_includes_api_key_when_set(self, mock_sv):
         mock_sv.return_value = True
         prov = AnthropicProvider(_make_config(api_key="sk-test-123"), "high")
-        args = prov.build_completion_args([{"role": "user", "content": "hi"}])
+        args = prov.build_completion_args(
+            [{"role": "user", "content": "hi"}], tools=[], tool_choice="auto"
+        )
         assert args["api_key"] == "sk-test-123"
 
     @patch("strix.llm.provider_anthropic.supports_vision")
     def test_no_api_key_when_none(self, mock_sv, provider):
         mock_sv.return_value = True
-        args = provider.build_completion_args([{"role": "user", "content": "hi"}])
+        args = provider.build_completion_args(
+            [{"role": "user", "content": "hi"}], tools=[], tool_choice="auto"
+        )
         assert "api_key" not in args
 
 
