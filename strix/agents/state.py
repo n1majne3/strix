@@ -45,11 +45,20 @@ class AgentState(BaseModel):
         self.last_updated = datetime.now(UTC).isoformat()
 
     def add_message(
-        self, role: str, content: Any, thinking_blocks: list[dict[str, Any]] | None = None
+        self,
+        role: str,
+        content: Any,
+        thinking_blocks: list[dict[str, Any]] | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        tool_call_id: str | None = None,
     ) -> None:
-        message = {"role": role, "content": content}
+        message: dict[str, Any] = {"role": role, "content": content}
         if thinking_blocks:
             message["thinking_blocks"] = thinking_blocks
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        if tool_call_id:
+            message["tool_call_id"] = tool_call_id
         self.messages.append(message)
         self.last_updated = datetime.now(UTC).isoformat()
 

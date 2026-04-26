@@ -53,7 +53,40 @@ def _count_tokens(text: str, model: str) -> int:
 
 
 def _get_message_tokens(msg: dict[str, Any], model: str) -> int:
+    role = msg.get("role", "")
     content = msg.get("content", "")
+
+    # Tool role messages: count the content text
+    if role == "tool":
+        if isinstance(content, str):
+            return _count_tokens(content, model)
+        if isinstance(content, list):
+            return sum(
+                _count_tokens(item.get("text", ""), model)
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+        return 0
+
+    # Assistant messages with tool_calls: count text content + serialized tool calls
+    if role == "assistant" and msg.get("tool_calls"):
+        total = 0
+        if isinstance(content, str):
+            total += _count_tokens(content, model)
+        elif isinstance(content, list):
+            total += sum(
+                _count_tokens(item.get("text", ""), model)
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+        # Add tokens for serialized tool call arguments
+        for tc in msg["tool_calls"]:
+            func = tc.get("function", {})
+            total += _count_tokens(func.get("name", ""), model)
+            total += _count_tokens(func.get("arguments", ""), model)
+        return total
+
+    # Standard messages
     if isinstance(content, str):
         return _count_tokens(content, model)
     if isinstance(content, list):
@@ -66,7 +99,49 @@ def _get_message_tokens(msg: dict[str, Any], model: str) -> int:
 
 
 def _extract_message_text(msg: dict[str, Any]) -> str:
+    role = msg.get("role", "")
     content = msg.get("content", "")
+
+    # Tool role messages: extract text content
+    if role == "tool":
+        tool_call_id = msg.get("tool_call_id", "")
+        prefix = f"[Tool result {tool_call_id}]: " if tool_call_id else "[Tool result]: "
+        if isinstance(content, str):
+            return prefix + content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    elif item.get("type") == "image_url":
+                        parts.append("[IMAGE]")
+            return prefix + " ".join(parts)
+        return prefix + str(content)
+
+    # Assistant messages with tool_calls: include serialized tool calls in text
+    if role == "assistant" and msg.get("tool_calls"):
+        parts = []
+        if isinstance(content, str) and content.strip():
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    if text.strip():
+                        parts.append(text)
+
+        # Serialize tool calls to readable text
+        for tc in msg["tool_calls"]:
+            func = tc.get("function", {})
+            name = func.get("name", "unknown")
+            args_str = func.get("arguments", "{}")
+            tc_id = tc.get("id", "")
+            parts.append(f"[Tool call {tc_id}: {name}({args_str})]")
+
+        return " ".join(parts)
+
+    # Standard messages
     if isinstance(content, str):
         return content
 

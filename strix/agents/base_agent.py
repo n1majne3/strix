@@ -377,7 +377,9 @@ class BaseAgent(metaclass=AgentMeta):
 
         content_stripped = (final_response.content or "").strip()
 
-        if not content_stripped:
+        if not content_stripped and not (
+            hasattr(final_response, "tool_invocations") and final_response.tool_invocations
+        ):
             corrective_message = (
                 "You MUST NOT respond with empty messages. "
                 "If you currently have nothing to do or say, use an appropriate tool instead:\n"
@@ -392,7 +394,16 @@ class BaseAgent(metaclass=AgentMeta):
             return False
 
         thinking_blocks = getattr(final_response, "thinking_blocks", None)
-        self.state.add_message("assistant", final_response.content, thinking_blocks=thinking_blocks)
+
+        # Extract tool_calls (raw LiteLLM format) to store on the assistant message
+        raw_tool_calls = getattr(final_response, "tool_calls", None)
+
+        self.state.add_message(
+            "assistant",
+            final_response.content,
+            thinking_blocks=thinking_blocks,
+            tool_calls=raw_tool_calls,
+        )
         if tracer:
             tracer.clear_streaming_content(self.state.agent_id)
             tracer.log_chat_message(
@@ -409,6 +420,10 @@ class BaseAgent(metaclass=AgentMeta):
 
         if actions:
             return await self._execute_actions(actions, tracer)
+
+        if not content_stripped:
+            # Tool-only response with no text content — not a text response
+            return False
 
         return None
 
