@@ -855,8 +855,8 @@ class TestBuildCompletionArgs:
         with patch.object(LLM, "_load_system_prompt", return_value="Test"):
             llm = LLM(mock_llm_config, agent_name=None)
 
-        with patch.object(llm, "_supports_vision", return_value=True):
-            args = llm._build_completion_args([{"role": "user", "content": "Hi"}])
+        with patch.object(llm._provider, "supports_vision", return_value=True):
+            args = llm._provider.build_completion_args([{"role": "user", "content": "Hi"}])
 
         assert "tools" in args
         assert "tool_choice" in args
