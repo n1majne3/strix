@@ -849,10 +849,11 @@ class TestFullPipelineSimulation:
         )
 
         # Simulate interruption
-        content = tracer.finalize_streaming_as_interrupted("agent-1")
+        content, _ = tracer.finalize_streaming_as_interrupted("agent-1")
         assert content is not None
         assert "middle of" in content
         # Note: finalize_streaming_as_interrupted clears streaming_content
         # but leaves the accumulator intact (existing behavior)
         # After finalization, text content is cleared
-        assert tracer.get_streaming_content("agent-1") is None
+        text_content, _ = tracer.get_streaming_content("agent-1")
+        assert text_content is None

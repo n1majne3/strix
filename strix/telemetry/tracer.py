@@ -6,8 +6,12 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+
+if TYPE_CHECKING:
+    from strix.interface.streaming_parser import StreamingAccumulator, StreamSegment
 
 from opentelemetry import trace
 from opentelemetry.trace import SpanContext, SpanKind
@@ -33,18 +37,18 @@ except ImportError:  # pragma: no cover - exercised when dependency is absent
 
 logger = logging.getLogger(__name__)
 
-_global_tracer: Optional["Tracer"] = None
+_global_tracer: Tracer | None = None
 
 _OTEL_BOOTSTRAP_LOCK = threading.Lock()
 _OTEL_BOOTSTRAPPED = False
 _OTEL_REMOTE_ENABLED = False
 
 
-def get_global_tracer() -> Optional["Tracer"]:
+def get_global_tracer() -> Tracer | None:
     return _global_tracer
 
 
-def set_global_tracer(tracer: "Tracer") -> None:
+def set_global_tracer(tracer: Tracer) -> None:
     global _global_tracer  # noqa: PLW0603
     _global_tracer = tracer
 
@@ -60,6 +64,7 @@ class Tracer:
         self.tool_executions: dict[int, dict[str, Any]] = {}
         self.chat_messages: list[dict[str, Any]] = []
         self.streaming_content: dict[str, str] = {}
+        self.streaming_tool_states: dict[str, dict[int, dict[str, str]]] = {}
         self.interrupted_content: dict[str, str] = {}
         self._streaming_accumulators: dict[str, StreamingAccumulator] = {}
 
@@ -841,13 +846,17 @@ class Tracer:
         Otherwise the plain-text fallback path is used.
         """
         self.streaming_content[agent_id] = content
+        if tool_states is not None:
+            self.streaming_tool_states[agent_id] = tool_states
+        else:
+            self.streaming_tool_states.pop(agent_id, None)
 
         if tool_states is not None:
             # Rebuild accumulator from accumulated data
             acc = self._get_or_create_accumulator(agent_id)
             acc.text_content = content
             # Reconstruct tool-call states in the accumulator
-            acc._tool_calls.clear()  # noqa: SLF001
+            acc._tool_calls.clear()
             for idx, state in sorted(tool_states.items()):
                 from strix.interface.streaming_parser import _ToolCallState
 
@@ -856,16 +865,16 @@ class Tracer:
                     name=state.get("name", ""),
                     arguments_json=state.get("arguments", ""),
                 )
-                acc._tool_calls[idx] = tc  # noqa: SLF001
+                acc._tool_calls[idx] = tc
 
-    def _get_or_create_accumulator(self, agent_id: str) -> "StreamingAccumulator":
+    def _get_or_create_accumulator(self, agent_id: str) -> StreamingAccumulator:
         from strix.interface.streaming_parser import StreamingAccumulator
 
         if agent_id not in self._streaming_accumulators:
             self._streaming_accumulators[agent_id] = StreamingAccumulator()
         return self._streaming_accumulators[agent_id]
 
-    def get_streaming_segments(self, agent_id: str) -> "list[StreamSegment]":
+    def get_streaming_segments(self, agent_id: str) -> list[StreamSegment]:
         """Return current streaming segments for the TUI."""
         from strix.interface.streaming_parser import StreamSegment
 
@@ -880,13 +889,19 @@ class Tracer:
 
     def clear_streaming_content(self, agent_id: str) -> None:
         self.streaming_content.pop(agent_id, None)
+        self.streaming_tool_states.pop(agent_id, None)
         self._streaming_accumulators.pop(agent_id, None)
 
-    def get_streaming_content(self, agent_id: str) -> str | None:
-        return self.streaming_content.get(agent_id)
+    def get_streaming_content(
+        self, agent_id: str
+    ) -> tuple[str | None, dict[int, dict[str, str]] | None]:
+        return self.streaming_content.get(agent_id), self.streaming_tool_states.get(agent_id)
 
-    def finalize_streaming_as_interrupted(self, agent_id: str) -> str | None:
+    def finalize_streaming_as_interrupted(
+        self, agent_id: str
+    ) -> tuple[str | None, dict[int, dict[str, str]] | None]:
         content = self.streaming_content.pop(agent_id, None)
+        tool_states = self.streaming_tool_states.pop(agent_id, None)
         if content and content.strip():
             self.interrupted_content[agent_id] = content
             self.log_chat_message(
@@ -895,9 +910,9 @@ class Tracer:
                 agent_id=agent_id,
                 metadata={"interrupted": True},
             )
-            return content
+            return content, tool_states
 
-        return self.interrupted_content.pop(agent_id, None)
+        return self.interrupted_content.pop(agent_id, None), tool_states
 
     def cleanup(self) -> None:
         self.save_run_data(mark_complete=True)

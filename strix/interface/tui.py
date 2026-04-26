@@ -1816,7 +1816,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             return
 
         if self.tracer:
-            streaming_content = self.tracer.get_streaming_content(self.selected_agent_id)
+            streaming_content, _ = self.tracer.get_streaming_content(self.selected_agent_id)
             if streaming_content and streaming_content.strip():
                 self.tracer.clear_streaming_content(self.selected_agent_id)
                 self.tracer.interrupted_content[self.selected_agent_id] = streaming_content

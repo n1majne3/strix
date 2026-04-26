@@ -231,7 +231,7 @@ class BaseAgent(metaclass=AgentMeta):
             except asyncio.CancelledError:
                 self._current_task = None
                 if tracer:
-                    partial_content = tracer.finalize_streaming_as_interrupted(self.state.agent_id)
+                    partial_content, _ = tracer.finalize_streaming_as_interrupted(self.state.agent_id)
                     if partial_content and partial_content.strip():
                         self.state.add_message(
                             "assistant", f"{partial_content}\n\n[ABORTED BY USER]"
