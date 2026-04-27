@@ -6,60 +6,62 @@
 
 <div align="center">
 
-# Strix
+# Strix (Fork)
 
-### Open-source AI hackers to find and fix your app’s vulnerabilities.
+### Enhanced fork with native SDK providers, prompt caching, extended thinking, and lazy skill loading.
+
+Fork of [usestrix/strix](https://github.com/usestrix/strix) — open-source AI hackers to find and fix your app's vulnerabilities.
 
 <br/>
 
-
-<a href="https://docs.strix.ai"><img src="https://img.shields.io/badge/Docs-docs.strix.ai-2b9246?style=for-the-badge&logo=gitbook&logoColor=white" alt="Docs"></a>
-<a href="https://strix.ai"><img src="https://img.shields.io/badge/Website-strix.ai-f0f0f0?style=for-the-badge&logoColor=000000" alt="Website"></a>
-[![](https://dcbadge.limes.pink/api/server/strix-ai)](https://discord.gg/strix-ai)
-
-<a href="https://deepwiki.com/usestrix/strix"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-<a href="https://github.com/usestrix/strix"><img src="https://img.shields.io/github/stars/usestrix/strix?style=flat-square" alt="GitHub Stars"></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-3b82f6?style=flat-square" alt="License"></a>
-<a href="https://pypi.org/project/strix-agent/"><img src="https://img.shields.io/pypi/v/strix-agent?style=flat-square" alt="PyPI Version"></a>
-
-
-<a href="https://discord.gg/strix-ai"><img src="https://github.com/usestrix/.github/raw/main/imgs/Discord.png" height="40" alt="Join Discord"></a>
-<a href="https://x.com/strix_ai"><img src="https://github.com/usestrix/.github/raw/main/imgs/X.png" height="40" alt="Follow on X"></a>
-
-
-<a href="https://trendshift.io/repositories/15362" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15362" alt="usestrix/strix | Trendshift" width="250" height="55"/></a>
+[<img src="https://github.com/usestrix/.github/raw/main/imgs/Discord.png" height="40" alt="Join Discord">](https://discord.gg/strix-ai)
+[<img src="https://github.com/usestrix/.github/raw/main/imgs/X.png" height="40" alt="Follow on X">](https://x.com/strix_ai)
 
 </div>
 
+---
 
+## What's Changed from Upstream
 
-> [!TIP]
-> **New!** Strix integrates seamlessly with GitHub Actions and CI/CD pipelines. Automatically scan for vulnerabilities on every pull request and block insecure code before it reaches production!
+This fork enhances the LLM layer with several improvements over the upstream [usestrix/strix](https://github.com/usestrix/strix):
+
+### Native SDK Providers
+
+The LLM layer has been rewritten from a LiteLLM-only backend to a **dual native SDK provider architecture**:
+
+- **AnthropicProvider** — Uses the native `anthropic` Python SDK with full Anthropic Messages API support
+- **OpenAIProvider** — Uses the native `openai` Python SDK with streaming and usage tracking
+
+A `ProviderBase` abstract class provides a unified interface, and `get_provider()` auto-selects based on the canonical model name.
+
+### Anthropic-Specific Enhancements
+
+- **Prompt caching** — Automatic `cache_control` markers on system prompts and last user message for Anthropic prompt caching (reduces cost and latency)
+- **Extended thinking** — Configurable thinking budgets mapped from reasoning effort levels (`low`/`medium`/`high`)
+- **Streaming tool calls** — Partial tool-call state streamed in real-time, not just at completion
+- **Message format conversion** — Automatic OpenAI-to-Anthropic message translation (tool calls, tool results, consecutive user message merging)
+
+### Lazy Skill Loading
+
+Skills are categorized into **essential** (always loaded into the system prompt) and **deferred** (loaded on-demand). This reduces token usage on startup while keeping capabilities available when needed.
+
+### Real Cost Tracking
+
+Both providers calculate actual costs per request using litellm's pricing database, with static fallback pricing tables for newer models.
 
 ---
 
-
 ## Strix Overview
 
-Strix are autonomous AI agents that act just like real hackers - they run your code dynamically, find vulnerabilities, and validate them through actual proof-of-concepts. Built for developers and security teams who need fast, accurate security testing without the overhead of manual pentesting or the false positives of static analysis tools.
+Strix are autonomous AI agents that act just like real hackers — they run your code dynamically, find vulnerabilities, and validate them through actual proof-of-concepts. Built for developers and security teams who need fast, accurate security testing without the overhead of manual pentesting or the false positives of static analysis tools.
 
 **Key Capabilities:**
 
 - **Full hacker toolkit** out of the box
 - **Teams of agents** that collaborate and scale
 - **Real validation** with PoCs, not false positives
-- **Developer‑first** CLI with actionable reports
-- **Auto‑fix & reporting** to accelerate remediation
-
-
-<br>
-
-
-<div align="center">
-  <a href="https://strix.ai">
-    <img src=".github/screenshot.png" alt="Strix Demo" width="1000" style="border-radius: 16px;">
-  </a>
-</div>
+- **Developer-first** CLI with actionable reports
+- **Auto-fix & reporting** to accelerate remediation
 
 
 ## Use Cases
@@ -69,11 +71,11 @@ Strix are autonomous AI agents that act just like real hackers - they run your c
 - **Bug Bounty Automation** - Automate bug bounty research and generate PoCs for faster reporting
 - **CI/CD Integration** - Run tests in CI/CD to block vulnerabilities before reaching production
 
-## 🚀 Quick Start
+## Quick Start
 
 **Prerequisites:**
 - Docker (running)
-- An LLM API key from any [supported provider](https://docs.strix.ai/llm-providers/overview) (OpenAI, Anthropic, Google, etc.)
+- An LLM API key from any supported provider (OpenAI, Anthropic, Google, etc.)
 
 ### Installation & First Scan
 
@@ -94,21 +96,56 @@ strix --target ./app-directory
 
 ---
 
-## ☁️ Strix Platform
+## Architecture
 
-Try the Strix full-stack security platform at **[app.strix.ai](https://app.strix.ai)** — sign up for free, connect your repos and domains, and launch a pentest in minutes.
+### Provider System
 
-- **Validated findings with PoCs** and reproduction steps
-- **One-click autofix** as ready-to-merge pull requests
-- **Continuous monitoring** across code, cloud, and infrastructure
-- **Integrations** with GitHub, Slack, Jira, Linear, and CI/CD pipelines
-- **Continuous learning** that builds on past findings and remediations
+The LLM layer uses a provider-based architecture:
 
-[**Start your first pentest →**](https://app.strix.ai)
+```
+LLMConfig  -->  get_provider()  -->  AnthropicProvider (anthropic/ models)
+                                -->  OpenAIProvider    (openai/ models)
+```
+
+Each provider implements the `ProviderBase` interface with:
+- `generate_stream()` — Streaming LLM responses with partial tool-call state
+- `supports_vision()` / `supports_reasoning()` / `supports_prompt_caching()` — Capability detection
+- `should_retry()` — Retryable error detection (429, 500, 502, 503)
+- `get_stats()` — Accumulated token usage and cost
+
+### Anthropic Provider
+
+Uses the native `anthropic` AsyncAnthropic client with:
+
+| Feature | Details |
+|---------|---------|
+| Prompt caching | `cache_control: ephemeral` on system and last user message |
+| Extended thinking | Budget mapped from effort: `low` (4K), `medium` (16K), `high` (64K) |
+| Tool calling | Full OpenAI-to-Anthropic message format conversion |
+| Streaming | Real-time tool-call state + thinking blocks |
+
+### OpenAI Provider
+
+Uses the native `openai` AsyncOpenAI client with:
+
+| Feature | Details |
+|---------|---------|
+| Streaming | `stream_options: include_usage` for token tracking |
+| Tool calling | Native function calling with streaming deltas |
+| Cost tracking | Cached token detection from `prompt_tokens_details` |
+
+### Skill Loading
+
+Skills are loaded in two phases:
+
+1. **Essential** (always loaded): `scan_modes`, `coordination`, `root_agent`, `custom`
+2. **Deferred** (on-demand): `vulnerabilities`, `tooling`, `frameworks`, `technologies`
+
+Deferred skills are loaded via the `load_skill` tool when the agent needs them.
 
 ---
 
-## ✨ Features
+## Features
 
 ### Agentic Security Tools
 
@@ -183,7 +220,7 @@ strix -n --target ./ --scan-mode quick --scope-mode diff --diff-base origin/main
 
 ### Headless Mode
 
-Run Strix programmatically without interactive UI using the `-n/--non-interactive` flag—perfect for servers and automated jobs. The CLI prints real-time vulnerability findings, and the final report before exiting. Exits with non-zero code when vulnerabilities are found.
+Run Strix programmatically without interactive UI using the `-n/--non-interactive` flag — perfect for servers and automated jobs. The CLI prints real-time vulnerability findings and the final report before exiting. Exits with non-zero code when vulnerabilities are found.
 
 ```bash
 strix -n --target https://your-app.com
@@ -218,11 +255,6 @@ jobs:
         run: strix -n -t ./ --scan-mode quick
 ```
 
-> [!TIP]
-> In CI pull request runs, Strix automatically scopes quick reviews to changed files.
-> If diff-scope cannot resolve, ensure checkout uses full history (`fetch-depth: 0`) or pass
-> `--diff-base` explicitly.
-
 ### Configuration
 
 ```bash
@@ -238,37 +270,71 @@ export STRIX_REASONING_EFFORT="high"  # control thinking effort (default: high, 
 > [!NOTE]
 > Strix automatically saves your configuration to `~/.strix/cli-config.json`, so you don't have to re-enter it on every run.
 
-**Recommended models for best results:**
+**Supported providers:**
 
-- [OpenAI GPT-5.4](https://openai.com/api/) — `openai/gpt-5.4`
-- [Anthropic Claude Sonnet 4.6](https://claude.com/platform/api) — `anthropic/claude-sonnet-4-6`
-- [Google Gemini 3 Pro Preview](https://cloud.google.com/vertex-ai) — `vertex_ai/gemini-3-pro-preview`
+| Provider | Model ID | Notes |
+|----------|----------|-------|
+| OpenAI | `openai/gpt-5.4` | Native SDK, streaming + usage tracking |
+| Anthropic | `anthropic/claude-sonnet-4-6` | Native SDK, prompt caching + extended thinking |
+| Anthropic | `anthropic/claude-opus-4-6` | Native SDK, prompt caching + extended thinking |
+| Others | LiteLLM format | Routed through LiteLLM compatibility layer |
 
-See the [LLM Providers documentation](https://docs.strix.ai/llm-providers/overview) for all supported providers including Vertex AI, Bedrock, Azure, and local models.
+---
 
-## Enterprise
+## Development
 
-Get the same Strix experience with [enterprise-grade](https://strix.ai/demo) controls: SSO (SAML/OIDC), custom compliance reports, dedicated support & SLA, custom deployment options (VPC/self-hosted), BYOK model support, and tailored agents optimized for your environment. [Learn more](https://strix.ai/demo).
+### Prerequisites
+
+- Python 3.12+
+- Docker (running)
+- [uv](https://docs.astral.sh/uv/) for dependency management
+
+### Setup
+
+```bash
+git clone https://github.com/n1majne3/strix.git
+cd strix
+uv sync
+uv run pre-commit install
+```
+
+### Running Tests
+
+```bash
+# All tests with coverage
+make test
+
+# Specific test suites
+uv run pytest tests/llm/                    # LLM provider tests
+uv run pytest tests/llm/test_provider_anthropic.py  # Anthropic-specific
+uv run pytest tests/llm/test_provider_openai.py     # OpenAI-specific
+
+# Lint and type check
+make check-all
+```
+
+---
 
 ## Documentation
 
-Full documentation is available at **[docs.strix.ai](https://docs.strix.ai)** — including detailed guides for usage, CI/CD integrations, skills, and advanced configuration.
+Full documentation is available at [docs.strix.ai](https://docs.strix.ai).
+
+Local preview:
+
+```bash
+npm i -g mintlify
+cd docs && mintlify dev
+```
+
+---
 
 ## Contributing
 
-We welcome contributions of code, docs, and new skills - check out our [Contributing Guide](https://docs.strix.ai/contributing) to get started or open a [pull request](https://github.com/usestrix/strix/pulls)/[issue](https://github.com/usestrix/strix/issues).
-
-## Join Our Community
-
-Have questions? Found a bug? Want to contribute? **[Join our Discord!](https://discord.gg/strix-ai)**
-
-## Support the Project
-
-**Love Strix?** Give us a ⭐ on GitHub!
+We welcome contributions — see the [Contributing Guide](CONTRIBUTING.md) to get started.
 
 ## Acknowledgements
 
-Strix builds on the incredible work of open-source projects like [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Textual](https://github.com/Textualize/textual). Huge thanks to their maintainers!
+Fork of [usestrix/strix](https://github.com/usestrix/strix). Strix builds on the incredible work of open-source projects like [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Textual](https://github.com/Textualize/textual). Huge thanks to their maintainers!
 
 
 > [!WARNING]

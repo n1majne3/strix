@@ -1,7 +1,9 @@
 ---
 title: "OpenAI"
-description: "Configure Strix with OpenAI models"
+description: "Configure Strix with OpenAI models via native SDK"
 ---
+
+Uses the native `openai` Python SDK for direct integration with the OpenAI Chat Completions API.
 
 ## Setup
 
@@ -13,6 +15,20 @@ export LLM_API_KEY="sk-..."
 ## Available Models
 
 See [OpenAI Models Documentation](https://platform.openai.com/docs/models) for the full list of available models.
+
+## Features
+
+### Streaming with Usage Tracking
+
+Uses `stream_options: { include_usage: true }` to receive token usage data in the final streaming chunk, enabling real-time cost tracking.
+
+### Content Filter Detection
+
+Detects when OpenAI's content filter triggers and surfaces a visible notice instead of silently producing empty output.
+
+### Cost Tracking
+
+Real-time cost calculation using litellm's pricing database with fallback to static pricing for newer models. Detects cached tokens from `prompt_tokens_details.cached_tokens`.
 
 ## Get API Key
 

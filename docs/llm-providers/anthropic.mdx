@@ -1,7 +1,9 @@
 ---
 title: "Anthropic"
-description: "Configure Strix with Claude models"
+description: "Configure Strix with Claude models via native SDK"
 ---
+
+Uses the native `anthropic` Python SDK for direct integration with the Anthropic Messages API.
 
 ## Setup
 
@@ -12,10 +14,46 @@ export LLM_API_KEY="sk-ant-..."
 
 ## Available Models
 
-| Model | Description |
-|-------|-------------|
-| `anthropic/claude-sonnet-4-6` | Best balance of intelligence and speed |
-| `anthropic/claude-opus-4-6` | Maximum capability for deep analysis |
+| Model | Description | Thinking | Vision |
+|-------|-------------|----------|--------|
+| `anthropic/claude-sonnet-4-6` | Best balance of intelligence and speed | Yes | Yes |
+| `anthropic/claude-opus-4-6` | Maximum capability for deep analysis | Yes | Yes |
+
+## Features
+
+### Prompt Caching
+
+Anthropic provider automatically adds `cache_control` markers to the system prompt and the last user message. This enables Anthropic's prompt caching, reducing both cost and latency on repeated queries with the same system prompt.
+
+### Extended Thinking
+
+Reasoning models support configurable thinking budgets mapped from the `STRIX_REASONING_EFFORT` setting:
+
+| Effort | Thinking Budget |
+|--------|----------------|
+| `low` | 4,096 tokens |
+| `medium` | 16,384 tokens |
+| `high` | 64,536 tokens |
+
+```bash
+export STRIX_REASONING_EFFORT="high"
+```
+
+### Streaming Tool Calls
+
+Tool call state is streamed incrementally during generation, not just at completion. This enables real-time visibility into what the agent is planning.
+
+### Message Format Conversion
+
+The provider handles automatic conversion between OpenAI-style and Anthropic-style message formats:
+- System messages extracted to the `system` parameter
+- `tool_calls` converted to Anthropic `tool_use` content blocks
+- `tool` role messages converted to `tool_result` content blocks
+- Consecutive user messages merged (required by Anthropic API)
+
+## Cost Tracking
+
+Real-time cost calculation using litellm's pricing database with fallback to static pricing for newer models.
 
 ## Get API Key
 

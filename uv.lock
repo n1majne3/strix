@@ -5442,6 +5442,7 @@ name = "strix-agent"
 version = "0.8.3"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "cvss" },
     { name = "docker" },
     { name = "litellm", extra = ["proxy"] },
@@ -5491,6 +5492,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.86.0" },
     { name = "cvss", specifier = ">=3.2" },
     { name = "docker", specifier = ">=7.1.0" },
     { name = "fastapi", marker = "extra == 'sandbox'" },

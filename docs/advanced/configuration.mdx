@@ -5,6 +5,16 @@ description: "Environment variables for Strix"
 
 Configure Strix using environment variables or a config file.
 
+## Provider Architecture
+
+Strix uses a provider-based LLM architecture:
+
+- **`openai/` models** are routed to `OpenAIProvider` (native `openai` SDK)
+- **`anthropic/` models** are routed to `AnthropicProvider` (native `anthropic` SDK with prompt caching and extended thinking)
+- **All other prefixes** fall through to LiteLLM
+
+Each provider implements streaming, tool calling, usage tracking, and cost calculation natively.
+
 ## LLM Configuration
 
 <ParamField path="STRIX_LLM" type="string" required>

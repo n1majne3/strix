@@ -15,7 +15,7 @@ Thank you for your interest in contributing to Strix! This guide will help you g
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/usestrix/strix.git
+   git clone https://github.com/n1majne3/strix.git
    cd strix
    ```
 

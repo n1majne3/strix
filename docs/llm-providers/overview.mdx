@@ -3,22 +3,34 @@ title: "Overview"
 description: "Configure your AI model for Strix"
 ---
 
-Strix uses [LiteLLM](https://docs.litellm.ai/docs/providers) for model compatibility, supporting 100+ LLM providers.
+Strix supports multiple LLM providers through a dual architecture:
+
+- **Native SDK providers** for OpenAI and Anthropic — direct SDK integration with full streaming, prompt caching, and extended thinking support
+- **LiteLLM compatibility layer** for 100+ other providers via [LiteLLM](https://docs.litellm.ai/docs/providers)
 
 ## Configuration
 
 Set your model and API key:
 
-| Model             | Provider      | Configuration                    |
-| ----------------- | ------------- | -------------------------------- |
-| GPT-5.4           | OpenAI        | `openai/gpt-5.4`                 |
-| Claude Sonnet 4.6 | Anthropic     | `anthropic/claude-sonnet-4-6`    |
-| Gemini 3 Pro      | Google Vertex | `vertex_ai/gemini-3-pro-preview` |
+| Model             | Provider      | Configuration                    | SDK        |
+| ----------------- | ------------- | -------------------------------- | ---------- |
+| GPT-5.4           | OpenAI        | `openai/gpt-5.4`                 | Native     |
+| Claude Sonnet 4.6 | Anthropic     | `anthropic/claude-sonnet-4-6`    | Native     |
+| Gemini 3 Pro      | Google Vertex | `vertex_ai/gemini-3-pro-preview` | LiteLLM    |
 
 ```bash
 export STRIX_LLM="openai/gpt-5.4"
 export LLM_API_KEY="your-api-key"
 ```
+
+## Native SDK Providers
+
+Models prefixed with `openai/` or `anthropic/` are routed to native SDK providers:
+
+- **OpenAI** — Uses `AsyncOpenAI` with streaming, usage tracking, and cost calculation
+- **Anthropic** — Uses `AsyncAnthropic` with prompt caching, extended thinking, and streaming tool calls
+
+All other prefixes (e.g. `vertex_ai/`, `bedrock/`, `ollama/`) fall through to LiteLLM.
 
 ## Local Models
 
@@ -35,10 +47,10 @@ See the [Local Models guide](/llm-providers/local) for setup instructions and re
 
 <CardGroup cols={2}>
   <Card title="OpenAI" href="/llm-providers/openai">
-    GPT-5.4 models.
+    GPT-5.4 models via native SDK.
   </Card>
   <Card title="Anthropic" href="/llm-providers/anthropic">
-    Claude Opus, Sonnet, and Haiku.
+    Claude with prompt caching and extended thinking.
   </Card>
   <Card title="OpenRouter" href="/llm-providers/openrouter">
     Access 100+ models through a single API.
@@ -59,7 +71,7 @@ See the [Local Models guide](/llm-providers/local) for setup instructions and re
 
 ## Model Format
 
-Use LiteLLM's `provider/model-name` format:
+Use the `provider/model-name` format:
 
 ```
 openai/gpt-5.4

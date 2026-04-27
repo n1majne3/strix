@@ -13,6 +13,17 @@ Skills inject this deep, specialized knowledge directly into the agent's context
 
 ## How They Work
 
+### Lazy Loading
+
+Skills are loaded in two phases to minimize token usage:
+
+- **Essential skills** (always loaded): `scan_modes`, `coordination`, `root_agent`, `custom`
+- **Deferred skills** (on-demand): `vulnerabilities`, `tooling`, `frameworks`, `technologies`
+
+Deferred skills are loaded via the `load_skill` tool when the agent needs them, rather than being included in the initial system prompt.
+
+### Agent Skill Selection
+
 When Strix spawns an agent for a specific task, it selects up to 5 relevant skills based on the context:
 
 ```python
