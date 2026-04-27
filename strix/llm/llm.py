@@ -14,6 +14,11 @@ from strix.utils.resource_paths import get_strix_resource_path
 
 logger = logging.getLogger(__name__)
 
+# Skill categories/prefixes that are always loaded into the system prompt.
+# All other skills (vulnerabilities, tooling, frameworks, etc.) are deferred
+# and only loaded on-demand via the load_skill tool.
+_ESSENTIAL_CATEGORIES = {"scan_modes", "coordination", "root_agent", "custom"}
+
 
 def get_provider(config: LLMConfig, reasoning_effort: str) -> "ProviderBase":
     """Return the appropriate provider based on canonical model name."""
@@ -35,6 +40,7 @@ class LLM:
         self.agent_name = agent_name
         self.agent_id: str | None = None
         self._active_skills: list[str] = list(config.skills or [])
+        self._force_loaded_skills: set[str] = set()  # Skills explicitly loaded via add_skills()
         self._system_prompt_context: dict[str, Any] = dict(
             getattr(config, "system_prompt_context", {}) or {}
         )
@@ -86,19 +92,49 @@ class LLM:
         except Exception:  # noqa: BLE001
             return ""
 
+    def _is_essential_skill(self, skill_name: str) -> bool:
+        """Check if a skill is in an essential category."""
+        category = skill_name.split("/")[0] if "/" in skill_name else skill_name
+        return category in _ESSENTIAL_CATEGORIES
+
     def _get_skills_to_load(self) -> list[str]:
-        ordered_skills = [*self._active_skills]
+        # Filter active skills to essential categories + force-loaded (on-demand) skills
+        essential_skills = [
+            s for s in self._active_skills if self._is_essential_skill(s)
+        ]
+        forced_skills = [
+            s for s in self._active_skills if s in self._force_loaded_skills
+        ]
+
+        # Build ordered list: essential + forced (preserving order), then always-appended skills
+        ordered_skills: list[str] = []
+        seen: set[str] = set()
+        for skill_name in essential_skills + forced_skills:
+            if skill_name not in seen:
+                ordered_skills.append(skill_name)
+                seen.add(skill_name)
+
         ordered_skills.append(f"scan_modes/{self.config.scan_mode}")
         if self.config.is_whitebox:
             ordered_skills.append("coordination/source_aware_whitebox")
             ordered_skills.append("custom/source_aware_sast")
 
+        # Deduplicate preserving order
         deduped: list[str] = []
-        seen: set[str] = set()
+        seen2: set[str] = set()
         for skill_name in ordered_skills:
-            if skill_name not in seen:
+            if skill_name not in seen2:
                 deduped.append(skill_name)
-                seen.add(skill_name)
+                seen2.add(skill_name)
+
+        deferred = len(self._active_skills) - len(essential_skills)
+        if deferred > 0 or self._force_loaded_skills:
+            logger.info(
+                "Skill loading: %d essential, %d deferred, %d force-loaded",
+                len(essential_skills),
+                deferred,
+                len(self._force_loaded_skills),
+            )
 
         return deduped
 
@@ -108,6 +144,7 @@ class LLM:
             if not skill_name or skill_name in self._active_skills:
                 continue
             self._active_skills.append(skill_name)
+            self._force_loaded_skills.add(skill_name)
             added.append(skill_name)
 
         if not added:
