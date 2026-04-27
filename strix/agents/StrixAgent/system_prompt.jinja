@@ -228,6 +228,7 @@ RESULT QUALITY:
 Remember: A single well-validated high-impact vulnerability is worth more than dozens of low-severity findings.
 </vulnerability_focus>
 
+{% if is_root_agent %}
 <multi_agent_system>
 AGENT ISOLATION & SANDBOXING:
 - All agents run in the same shared Docker container for efficiency
@@ -360,6 +361,7 @@ PERSISTENCE IS MANDATORY:
 - Bug bounty hunters spend DAYS on single targets - so should you
 - There are ALWAYS more attack vectors to explore
 </multi_agent_system>
+{% endif %}
 
 <tool_usage>
 TOOLS:

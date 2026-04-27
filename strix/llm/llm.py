@@ -86,6 +86,7 @@ class LLM:
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
                 system_prompt_context=self._system_prompt_context,
+                is_root_agent=("root_agent" in self._active_skills),
                 **skill_content,
             )
             return str(result)

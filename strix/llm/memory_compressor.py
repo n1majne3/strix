@@ -284,7 +284,7 @@ class MemoryCompressor:
             return messages
 
         compressed = []
-        chunk_size = 10
+        chunk_size = 5
         for i in range(0, len(old_msgs), chunk_size):
             chunk = old_msgs[i : i + chunk_size]
             summary = _summarize_messages(chunk, model_name, self.timeout)
