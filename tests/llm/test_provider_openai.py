@@ -645,3 +645,299 @@ class TestCostCalculation:
         )
         expected = 1000 * in_cost + 500 * out_cost
         assert cost == pytest.approx(expected, rel=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases — T03: Real API edge cases
+# ---------------------------------------------------------------------------
+
+
+def _make_content_filter_chunk() -> MagicMock:
+    """Create a mock chunk with finish_reason='content_filter' and no content."""
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()]
+    chunk.choices[0].delta = MagicMock()
+    chunk.choices[0].delta.content = None
+    chunk.choices[0].delta.tool_calls = None
+    chunk.choices[0].finish_reason = "content_filter"
+    chunk.usage = None
+    return chunk
+
+
+def _make_empty_choices_usage_chunk(prompt_tokens: int = 10, completion_tokens: int = 0) -> MagicMock:
+    """Usage chunk with empty choices — simulates OpenAI's final usage delivery."""
+    chunk = MagicMock()
+    chunk.choices = []
+    chunk.usage = MagicMock()
+    chunk.usage.prompt_tokens = prompt_tokens
+    chunk.usage.completion_tokens = completion_tokens
+    prompt_details = MagicMock()
+    prompt_details.cached_tokens = 0
+    chunk.usage.prompt_tokens_details = prompt_details
+    return chunk
+
+
+class TestContentFilterEdgeCase:
+    """OpenAI content_filter finish_reason should be visible, not silent."""
+
+    @pytest.mark.asyncio
+    async def test_content_filter_produces_visible_message(self, provider):
+        """When OpenAI filters content and produces nothing, a notice is included."""
+        chunks = [
+            _make_content_filter_chunk(),
+            _make_empty_choices_usage_chunk(prompt_tokens=50, completion_tokens=0),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "risky prompt"}],
+            tools=[],
+            tool_choice="auto",
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        assert "Content filtered" in final.content or "filtered" in final.content.lower(), (
+            f"Expected content filter notice, got: {final.content!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_content_filter_with_partial_content_passes_through(self, provider):
+        """If content was partially streamed before filter, original content is kept."""
+        text_chunk = _make_text_chunk("Here is some content")
+        filter_chunk = _make_content_filter_chunk()
+        usage_chunk = _make_empty_choices_usage_chunk(prompt_tokens=30, completion_tokens=5)
+
+        chunks = [text_chunk, filter_chunk, usage_chunk]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "partial"}],
+            tools=[],
+            tool_choice="auto",
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        # Partial content should be preserved, not replaced with filter notice
+        assert "Here is some content" in final.content
+
+
+class TestEmptyChoicesChunk:
+    """Empty choices with usage data — common in real OpenAI streams."""
+
+    @pytest.mark.asyncio
+    async def test_empty_choices_usage_chunk_updates_stats(self, provider):
+        """Usage from empty-choices chunks updates stats correctly."""
+        chunks = [
+            _make_text_chunk("hello"),
+            _make_empty_choices_usage_chunk(prompt_tokens=25, completion_tokens=8),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        async for _ in provider.generate_stream(
+            messages=[{"role": "user", "content": "hi"}], tools=[], tool_choice="auto"
+        ):
+            pass
+
+        stats = provider.get_stats()
+        assert stats.input_tokens == 25
+        assert stats.output_tokens == 8
+
+    @pytest.mark.asyncio
+    async def test_multiple_empty_choices_chunks_no_crash(self, provider):
+        """Multiple empty-choices chunks (usage + heartbeat) don't cause issues."""
+        heartbeat = MagicMock()
+        heartbeat.choices = []
+        heartbeat.usage = None
+
+        chunks = [
+            _make_text_chunk("hi"),
+            heartbeat,  # heartbeat with no usage
+            heartbeat,  # another heartbeat
+            _make_empty_choices_usage_chunk(prompt_tokens=15, completion_tokens=3),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "hi"}], tools=[], tool_choice="auto"
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        assert "hi" in final.content
+        assert provider.get_stats().input_tokens == 15
+
+
+class TestToolCallEdgeCases:
+    """Edge cases in tool-call argument parsing."""
+
+    @pytest.mark.asyncio
+    async def test_empty_arguments_produces_empty_dict(self, provider):
+        """Tool call with empty string arguments should produce {} args."""
+        chunks = [
+            _make_tool_call_chunk(index=0, tc_id="call_1", name="search", arguments=""),
+            _make_usage_chunk(20, 5),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "search"}],
+            tools=[{"type": "function", "function": {"name": "search"}}],
+            tool_choice="auto",
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert final.tool_invocations[0]["args"] == {}
+
+    @pytest.mark.asyncio
+    async def test_malformed_arguments_produces_empty_dict(self, provider):
+        """Tool call with malformed JSON arguments falls back to {}."""
+        malformed_chunk = MagicMock()
+        tc = MagicMock()
+        tc.index = 0
+        tc.id = "call_bad"
+        tc.function = MagicMock()
+        tc.function.name = "do_thing"
+        tc.function.arguments = "{invalid json"
+        malformed_chunk.choices = [MagicMock()]
+        malformed_chunk.choices[0].delta = MagicMock()
+        malformed_chunk.choices[0].delta.content = None
+        malformed_chunk.choices[0].delta.tool_calls = [tc]
+        malformed_chunk.usage = None
+
+        chunks = [malformed_chunk, _make_usage_chunk(20, 5)]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "do"}],
+            tools=[{"type": "function", "function": {"name": "do_thing"}}],
+            tool_choice="auto",
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert final.tool_invocations[0]["args"] == {}
+        assert final.tool_invocations[0]["toolName"] == "do_thing"
+
+    @pytest.mark.asyncio
+    async def test_unicode_arguments_parsed_correctly(self, provider):
+        """Tool call arguments with unicode characters parse correctly."""
+        chunks = [
+            _make_tool_call_chunk(index=0, tc_id="call_u", name="search", arguments='{"city": "東京"}'),
+            _make_usage_chunk(30, 10),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "weather"}],
+            tools=[{"type": "function", "function": {"name": "search"}}],
+            tool_choice="auto",
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert final.tool_invocations[0]["args"]["city"] == "東京"
+
+    @pytest.mark.asyncio
+    async def test_multiple_tool_calls_different_indices(self, provider):
+        """Multiple tool calls with different indices are tracked independently."""
+        tc1 = MagicMock()
+        tc1.index = 0
+        tc1.id = "call_a"
+        tc1.function = MagicMock()
+        tc1.function.name = "get_weather"
+        tc1.function.arguments = None
+
+        tc2 = MagicMock()
+        tc2.index = 1
+        tc2.id = "call_b"
+        tc2.function = MagicMock()
+        tc2.function.name = "get_time"
+        tc2.function.arguments = None
+
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        chunk1.choices[0].delta = MagicMock()
+        chunk1.choices[0].delta.content = None
+        chunk1.choices[0].delta.tool_calls = [tc1, tc2]
+        chunk1.usage = None
+
+        chunk2_tc1 = MagicMock()
+        chunk2_tc1.index = 0
+        chunk2_tc1.id = None
+        chunk2_tc1.function = MagicMock()
+        chunk2_tc1.function.name = None
+        chunk2_tc1.function.arguments = '{"city": "LA"}'
+
+        chunk2_tc2 = MagicMock()
+        chunk2_tc2.index = 1
+        chunk2_tc2.id = None
+        chunk2_tc2.function = MagicMock()
+        chunk2_tc2.function.name = None
+        chunk2_tc2.function.arguments = '{"tz": "PST"}'
+
+        chunk2 = MagicMock()
+        chunk2.choices = [MagicMock()]
+        chunk2.choices[0].delta = MagicMock()
+        chunk2.choices[0].delta.content = None
+        chunk2.choices[0].delta.tool_calls = [chunk2_tc1, chunk2_tc2]
+        chunk2.usage = None
+
+        chunks = [chunk1, chunk2, _make_usage_chunk(40, 15)]
+        provider._client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+        responses = []
+        async for resp in provider.generate_stream(
+            messages=[{"role": "user", "content": "weather and time"}],
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice="auto",
+        ):
+            responses.append(resp)
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert len(final.tool_invocations) == 2
+        assert final.tool_invocations[0]["toolName"] == "get_weather"
+        assert final.tool_invocations[0]["args"]["city"] == "LA"
+        assert final.tool_invocations[1]["toolName"] == "get_time"
+        assert final.tool_invocations[1]["args"]["tz"] == "PST"
+
+
+class TestUpdateUsageEdgeCases:
+    """Edge cases in usage extraction."""
+
+    def test_usage_with_none_prompt_tokens_handled(self, provider):
+        """prompt_tokens=None should be treated as 0."""
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = None
+        mock_usage.completion_tokens = 50
+        prompt_details = MagicMock()
+        prompt_details.cached_tokens = 0
+        mock_usage.prompt_tokens_details = prompt_details
+
+        provider._update_usage(mock_usage)
+        assert provider.get_stats().input_tokens == 0
+        assert provider.get_stats().output_tokens == 50
+
+    def test_usage_with_no_prompt_tokens_details_handled(self, provider):
+        """Missing prompt_tokens_details should not crash."""
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 100
+        mock_usage.completion_tokens = 50
+        mock_usage.prompt_tokens_details = None
+
+        provider._update_usage(mock_usage)
+        assert provider.get_stats().input_tokens == 100
+        assert provider.get_stats().output_tokens == 50
+        assert provider.get_stats().cached_tokens == 0

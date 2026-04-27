@@ -82,6 +82,7 @@ class OpenAIProvider(ProviderBase):
         accumulated = ""
         tool_call_states: dict[int, dict[str, str]] = {}
         has_tool_call_data = False
+        _content_filtered = False
 
         self._stats.requests += 1
 
@@ -106,6 +107,16 @@ class OpenAIProvider(ProviderBase):
                 continue
 
             choice = chunk.choices[0]
+
+            # Detect content-filter stop so it doesn't silently produce empty output.
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason == "content_filter":
+                logger.warning(
+                    "OpenAI content filter triggered — model refused to respond. "
+                    "This usually happens with security-related prompts."
+                )
+                _content_filtered = True
+
             delta = choice.delta
 
             # Extract text delta
@@ -177,8 +188,13 @@ class OpenAIProvider(ProviderBase):
                     "id": state["id"],
                 })
 
+        # If content was filtered and nothing accumulated, add a visible notice
+        final_content = accumulated or ""
+        if _content_filtered and not final_content:
+            final_content = "[Content filtered by OpenAI safety systems — request was refused]"
+
         yield LLMResponse(
-            content=accumulated or "",
+            content=final_content,
             tool_invocations=tool_invocations,
             tool_calls=tool_calls_raw,
             thinking_blocks=None,
