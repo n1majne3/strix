@@ -27,7 +27,7 @@ from strix.tools.registry import clear_registry, register_tool
 
 
 # ---------------------------------------------------------------------------
-# Streaming mock helpers — reused from test_provider_openai.py pattern
+# OpenAI-style streaming mock helpers (shared with OpenAI provider tests)
 # ---------------------------------------------------------------------------
 
 
@@ -126,134 +126,182 @@ def _make_openai_config(**overrides):
     return cfg
 
 
-def _build_stream_response(chunks, tool_calls_data=None, content=""):
-    """Build a mock response for Anthropic's stream_chunk_builder.
+# ---------------------------------------------------------------------------
+# Anthropic SDK stream event builders
+# ---------------------------------------------------------------------------
 
-    The Anthropic provider calls stream_chunk_builder(chunks) after the
-    streaming loop to extract tool_calls and usage stats.  With mock chunks,
-    stream_chunk_builder fails (it expects real litellm objects), so we patch
-    it with this builder.
 
-    Args:
-        chunks: The chunks that were streamed (used to derive usage).
-        tool_calls_data: List of dicts with {id, name, arguments} for each
-            tool call.  If None/empty, the response has no tool_calls.
-        content: The text content to set on the response message.
-    """
-    response = MagicMock()
-
-    # Build message
+def _make_message_start_event(input_tokens: int = 0) -> MagicMock:
+    """Create a message_start event."""
+    usage = MagicMock()
+    usage.input_tokens = input_tokens
     message = MagicMock()
-    message.content = content
-    message.tool_calls = None
-    message.thinking_blocks = None  # Explicitly None to pass _extract_thinking
+    message.usage = usage
+    event = MagicMock()
+    event.type = "message_start"
+    event.message = message
+    return event
 
-    if tool_calls_data:
-        tc_list = []
-        for tc_data in tool_calls_data:
-            tc = MagicMock()
-            tc.id = tc_data["id"]
-            tc.type = "function"
-            tc.function = MagicMock()
-            tc.function.name = tc_data["name"]
-            tc.function.arguments = tc_data["arguments"]
-            tc_list.append(tc)
-        message.tool_calls = tc_list
 
-    choice = MagicMock()
-    choice.message = message
-    response.choices = [choice]
+def _make_text_delta_event(text: str) -> MagicMock:
+    """Create a content_block_delta event with text_delta."""
+    delta = MagicMock()
+    delta.type = "text_delta"
+    delta.text = text
+    event = MagicMock()
+    event.type = "content_block_delta"
+    event.delta = delta
+    event.index = 0
+    return event
 
-    # Build usage from the usage chunk (last chunk has usage)
+
+def _make_tool_use_start_event(index: int, tc_id: str, name: str) -> MagicMock:
+    """Create a content_block_start event for a tool_use block."""
+    block = MagicMock()
+    block.type = "tool_use"
+    block.id = tc_id
+    block.name = name
+    event = MagicMock()
+    event.type = "content_block_start"
+    event.content_block = block
+    event.index = index
+    return event
+
+
+def _make_input_json_delta_event(index: int, partial_json: str) -> MagicMock:
+    """Create a content_block_delta event with input_json_delta."""
+    delta = MagicMock()
+    delta.type = "input_json_delta"
+    delta.partial_json = partial_json
+    event = MagicMock()
+    event.type = "content_block_delta"
+    event.delta = delta
+    event.index = index
+    return event
+
+
+def _make_content_block_stop_event(index: int) -> MagicMock:
+    """Create a content_block_stop event."""
+    event = MagicMock()
+    event.type = "content_block_stop"
+    event.index = index
+    return event
+
+
+def _make_message_delta_event(output_tokens: int = 0) -> MagicMock:
+    """Create a message_delta event with usage."""
+    usage = MagicMock()
+    usage.output_tokens = output_tokens
+    usage.cache_creation_input_tokens = 0
+    usage.cache_read_input_tokens = 0
+    event = MagicMock()
+    event.type = "message_delta"
+    event.usage = usage
+    return event
+
+
+def _make_message_stop_event() -> MagicMock:
+    """Create a message_stop event."""
+    event = MagicMock()
+    event.type = "message_stop"
+    return event
+
+
+def _chunks_to_anthropic_events(chunks):
+    """Convert OpenAI-style mock chunks to Anthropic stream events.
+
+    Takes the same chunk format used by OpenAI provider tests and produces
+    the sequence of Anthropic MessageStreamEvent objects that the native SDK
+    would emit.
+    """
+    events = []
+
+    # Find the usage chunk (has usage, no choices)
     usage_chunk = None
-    for c in chunks:
-        if getattr(c, "usage", None) and not getattr(c, "choices", None):
-            usage_chunk = c
+    for chunk in chunks:
+        if getattr(chunk, "usage", None) and not getattr(chunk, "choices", None):
+            usage_chunk = chunk
             break
-        # Also check for chunks with both usage and choices (some patterns)
-        if getattr(c, "usage", None):
-            usage_chunk = c
 
-    if usage_chunk:
-        response.usage = usage_chunk.usage
-    else:
-        mock_usage = MagicMock()
-        mock_usage.prompt_tokens = 0
-        mock_usage.completion_tokens = 0
-        mock_usage.cost = 0.0
-        mock_usage.prompt_tokens_details = MagicMock()
-        mock_usage.prompt_tokens_details.cached_tokens = 0
-        response.usage = mock_usage
+    input_tokens = getattr(usage_chunk, "usage", None)
+    input_tokens = getattr(input_tokens, "prompt_tokens", 0) if input_tokens else 0
+    output_tokens = getattr(usage_chunk, "usage", None)
+    output_tokens = getattr(output_tokens, "completion_tokens", 0) if output_tokens else 0
 
-    response._hidden_params = {}
-    return response
+    # Track tool call IDs to emit content_block_stop after final argument delta
+    active_tool_calls: dict[int, str] = {}  # index -> id
+
+    events.append(_make_message_start_event(input_tokens))
+
+    for chunk in chunks:
+        if getattr(chunk, "usage", None) and not getattr(chunk, "choices", None):
+            continue  # Skip usage chunks; handled at the end
+
+        if not chunk.choices:
+            continue
+
+        delta = chunk.choices[0].delta
+        tc_deltas = getattr(delta, "tool_calls", None)
+
+        if tc_deltas:
+            for tc in tc_deltas:
+                if tc.id:
+                    # First delta for this tool call — emit content_block_start
+                    active_tool_calls[tc.index] = tc.id
+                    events.append(
+                        _make_tool_use_start_event(tc.index, tc.id, tc.function.name)
+                    )
+                if tc.function and tc.function.arguments:
+                    events.append(
+                        _make_input_json_delta_event(tc.index, tc.function.arguments)
+                    )
+                    events.append(_make_content_block_stop_event(tc.index))
+        elif delta.content:
+            events.append(_make_text_delta_event(delta.content))
+
+    events.append(_make_message_delta_event(output_tokens))
+    events.append(_make_message_stop_event())
+    return events
 
 
-def _anthropic_stream_ctx(provider, chunks, tool_calls_data=None, content=""):
-    """Return a context manager that mocks acompletion, stream_chunk_builder, and completion_cost.
+class _AnthropicStreamAsyncCtx:
+    """Async context manager that yields Anthropic stream events."""
+
+    def __init__(self, events):
+        self._events = events
+
+    async def __aenter__(self):
+        return _AsyncIter(self._events)
+
+    async def __aexit__(self, *exc):
+        pass
+
+
+def _anthropic_stream_ctx(provider, chunks, **kwargs):
+    """Mock provider._client.messages.stream to emit Anthropic events.
+
+    Converts OpenAI-style chunks to Anthropic stream events and patches
+    provider._client.messages.stream to return them via an async context
+    manager matching the anthropic SDK's MessageStream protocol.
 
     Usage::
 
-        with _anthropic_stream_ctx(provider, chunks, tool_calls_data=[...], content="...") as mock_ac:
+        with _anthropic_stream_ctx(provider, chunks):
             async for resp in provider.generate_stream(...):
                 ...
-
-    The *tool_calls_data* list should contain dicts with ``id``, ``name``,
-    ``arguments`` keys matching the chunks' tool-call deltas.
     """
-    built = _build_stream_response(chunks, tool_calls_data, content)
-    return _AnthropicStreamCtx(chunks, built)
-
-
-class _AnthropicStreamCtx:
-    """Context manager that patches acompletion, stream_chunk_builder, and completion_cost."""
-
-    def __init__(self, chunks, built_response):
-        self._chunks = chunks
-        self._built = built_response
-        self._stack = None
-
-    def __enter__(self):
-        self._stack = contextlib.ExitStack()
-        self._stack.__enter__()
-        mock_ac = self._stack.enter_context(
-            patch("strix.llm.provider_anthropic.acompletion", new_callable=AsyncMock)
-        )
-        mock_ac.return_value = _AsyncIter(self._chunks)
-        self._stack.enter_context(
-            patch(
-                "strix.llm.provider_anthropic.stream_chunk_builder",
-                return_value=self._built,
-            )
-        )
-        self._stack.enter_context(
-            patch(
-                "strix.llm.provider_anthropic.completion_cost",
-                return_value=0.0,
-            )
-        )
-        return mock_ac
-
-    def __exit__(self, *exc):
-        if self._stack:
-            self._stack.__exit__(*exc)
-
-
-def _extract_tool_calls_data_from_turn(turn_content, turn_tool, turn_args, turn_call_id):
-    """Build tool_calls_data for stream_chunk_builder from turn parameters."""
-    return [
-        {
-            "id": turn_call_id,
-            "name": turn_tool,
-            "arguments": json.dumps(turn_args),
-        }
-    ]
+    events = _chunks_to_anthropic_events(chunks)
+    provider._client.messages.stream = MagicMock(
+        return_value=_AnthropicStreamAsyncCtx(events)
+    )
+    return contextlib.nullcontext()
 
 
 def _make_anthropic_provider():
-    """Create an AnthropicProvider with mocked acompletion."""
-    config = _make_anthropic_config()
-    provider = AnthropicProvider(config, reasoning_effort="high")
+    """Create an AnthropicProvider with a mocked AsyncAnthropic client."""
+    with patch("strix.llm.provider_anthropic.AsyncAnthropic"):
+        config = _make_anthropic_config()
+        provider = AnthropicProvider(config, reasoning_effort="high")
     return provider
 
 
