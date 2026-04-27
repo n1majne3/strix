@@ -762,10 +762,12 @@ class TestPrepareMessages:
     def test_empty_messages_returned_unchanged(self, provider):
         assert provider.prepare_messages([]) == []
 
-    def test_no_system_message_unchanged(self, provider):
+    def test_no_system_message_adds_cache_to_user(self, provider):
+        """Without system message, cache_control is still added to last user message."""
         messages = [{"role": "user", "content": "hi"}]
         result = provider.prepare_messages(messages)
-        assert result == messages
+        assert isinstance(result[0]["content"], list)
+        assert result[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
 
     def test_already_list_content_unchanged(self, provider):
         messages = [

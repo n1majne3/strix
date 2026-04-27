@@ -160,12 +160,13 @@ class AnthropicProvider(ProviderBase):
         return args
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Add cache_control markers to system message for Anthropic prompt caching."""
+        """Add cache_control markers for Anthropic prompt caching."""
         if not messages:
             return messages
 
         result = list(messages)
 
+        # Add cache_control to system message
         if result[0].get("role") == "system":
             content = result[0]["content"]
             if isinstance(content, str):
@@ -179,6 +180,23 @@ class AnthropicProvider(ProviderBase):
                         }
                     ],
                 }
+
+        # Add cache_control to last user message's last content block
+        for i in range(len(result) - 1, -1, -1):
+            if result[i].get("role") == "user":
+                content = result[i].get("content")
+                if isinstance(content, list) and content:
+                    last_block = content[-1]
+                    if isinstance(last_block, dict):
+                        content[-1] = {**last_block, "cache_control": {"type": "ephemeral"}}
+                elif isinstance(content, str):
+                    result[i] = {
+                        **result[i],
+                        "content": [
+                            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}},
+                        ],
+                    }
+                break
 
         return result
 
@@ -321,13 +339,17 @@ class AnthropicProvider(ProviderBase):
         OpenAI: {"type": "function", "function": {"name": ..., "parameters": ...}}
         Anthropic: {"name": ..., "input_schema": ...}
         """
-        return [
-            {
-                "name": tool.get("function", {}).get("name", ""),
-                "input_schema": tool.get("function", {}).get("parameters", {}),
+        result = []
+        for tool in tools:
+            func = tool.get("function", {})
+            converted: dict[str, Any] = {
+                "name": func.get("name", ""),
+                "input_schema": func.get("parameters", {}),
             }
-            for tool in tools
-        ]
+            if desc := func.get("description"):
+                converted["description"] = desc
+            result.append(converted)
+        return result
 
     @staticmethod
     def _convert_tool_choice(tool_choice: str) -> dict[str, str]:
