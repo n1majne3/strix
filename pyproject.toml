@@ -45,6 +45,7 @@ dependencies = [
   "opentelemetry-exporter-otlp-proto-http>=1.40.0",
   "scrubadub>=2.0.1",
   "openai>=1.30.0",
+  "anthropic>=0.86.0",
 ]
 
 [project.scripts]
@@ -138,6 +139,7 @@ module = [
     "scrubadub.*",
     "traceloop.*",
     "openai.*",
+    "anthropic.*",
 ]
 ignore_missing_imports = true
 
