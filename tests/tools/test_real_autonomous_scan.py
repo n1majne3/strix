@@ -4,8 +4,8 @@ These tests validate that a real autonomous loop can discover vulnerabilities
 using Anthropic and OpenAI models, proving the execution pipeline, tools,
 and cost tracking work with real API responses.
 
-Tests are gated behind ``STRIX_ANTHROPIC_API_KEY`` and
-``STRIX_OPENAI_API_KEY`` environment variables.
+Tests are gated behind ``STRIX_REAL_API_KEY`` and ``STRIX_REAL_API_BASE``
+environment variables.  If either is unset, tests are skipped.
 """
 
 from __future__ import annotations
@@ -15,15 +15,21 @@ from pathlib import Path
 
 import pytest
 
+
 # ---------------------------------------------------------------------------
 # Environment key helpers
 # ---------------------------------------------------------------------------
 
-ANTHROPIC_KEY_ENV = "STRIX_ANTHROPIC_API_KEY"
-OPENAI_KEY_ENV = "STRIX_OPENAI_API_KEY"
+_API_KEY_ENV = "STRIX_REAL_API_KEY"
+_API_BASE_ENV = "STRIX_REAL_API_BASE"
 
-anthropic_key = os.environ.get(ANTHROPIC_KEY_ENV)
-openai_key = os.environ.get(OPENAI_KEY_ENV)
+_api_key = os.environ.get(_API_KEY_ENV)
+_api_base = os.environ.get(_API_BASE_ENV)
+
+skip_if_no_credentials = pytest.mark.skipif(
+    not _api_key or not _api_base,
+    reason=f"Set {_API_KEY_ENV} and {_API_BASE_ENV} to run real API tests",
+)
 
 
 @pytest.fixture
@@ -49,23 +55,25 @@ def get_user(username: str):
 # Anthropic provider real API autonomous tests
 # ===========================================================================
 
+
 class TestAnthropicAutonomousScan:
     """Real autonomous scan tests using the Anthropic provider."""
 
-    async def test_autonomous_scan_finds_vulnerability(self, dummy_target: Path, monkeypatch: pytest.MonkeyPatch):
+    @skip_if_no_credentials
+    async def test_autonomous_scan_finds_vulnerability(
+        self, dummy_target: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """Run a real autonomous scan with Anthropic to find the SQLi."""
         from strix.agents.StrixAgent.strix_agent import StrixAgent
         from strix.llm.config import LLMConfig
 
         monkeypatch.setenv("STRIX_LLM", "openai/gpt-5.4-mini")
-        monkeypatch.setenv("LLM_API_KEY", "REDACTED_API_KEY")
-        monkeypatch.setenv("LLM_API_BASE", "REDACTED_API_BASE")
+        monkeypatch.setenv("LLM_API_KEY", _api_key)
+        monkeypatch.setenv("LLM_API_BASE", _api_base)
 
         config = {
             "llm_config": LLMConfig(
                 model_name="openai/gpt-5.4-mini",
-                api_key="REDACTED_API_KEY",
-                api_base="REDACTED_API_BASE",
                 scan_mode="quick",
             )
         }
@@ -81,41 +89,42 @@ class TestAnthropicAutonomousScan:
 
         assert agent.state.completed or len(agent.state.errors) > 0
         if not len(agent.state.errors) > 0:
-            assert "SQL" in str(agent.state.get_conversation_history()) or "Injection" in str(agent.state.get_conversation_history())
+            assert "SQL" in str(agent.state.get_conversation_history()) or "Injection" in str(
+                agent.state.get_conversation_history()
+            )
 
             stats = agent.llm._provider.get_stats()
-            # Cost might be 0 since it's a fallback or not in the pricing table, so we ignore the strict cost check
-            # assert stats.cost > 0
             assert stats.input_tokens > 0
-            assert stats.input_tokens < 12000, f"Optimization failed: used {stats.input_tokens} input tokens (expected < 12000)"
-            
-            # Verify the agent's final state
+            assert stats.input_tokens < 12000, (
+                f"Optimization failed: used {stats.input_tokens} input tokens (expected < 12000)"
+            )
+
             assert agent.state.iteration > 1, "Agent should have taken multiple steps"
-
-
 
 
 # ===========================================================================
 # OpenAI provider real API autonomous tests
 # ===========================================================================
 
+
 class TestOpenAIAutonomousScan:
     """Real autonomous scan tests using the OpenAI provider."""
 
-    async def test_autonomous_scan_finds_vulnerability(self, dummy_target: Path, monkeypatch: pytest.MonkeyPatch):
+    @skip_if_no_credentials
+    async def test_autonomous_scan_finds_vulnerability(
+        self, dummy_target: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """Run a real autonomous scan with OpenAI to find the SQLi."""
         from strix.agents.StrixAgent.strix_agent import StrixAgent
         from strix.llm.config import LLMConfig
 
         monkeypatch.setenv("STRIX_LLM", "openai/gpt-5.4-mini")
-        monkeypatch.setenv("LLM_API_KEY", "REDACTED_API_KEY")
-        monkeypatch.setenv("LLM_API_BASE", "REDACTED_API_BASE")
+        monkeypatch.setenv("LLM_API_KEY", _api_key)
+        monkeypatch.setenv("LLM_API_BASE", _api_base)
 
         config = {
             "llm_config": LLMConfig(
                 model_name="openai/gpt-5.4-mini",
-                api_key="REDACTED_API_KEY",
-                api_base="REDACTED_API_BASE",
                 scan_mode="quick",
             )
         }
@@ -131,13 +140,14 @@ class TestOpenAIAutonomousScan:
 
         assert agent.state.completed or len(agent.state.errors) > 0
         if not len(agent.state.errors) > 0:
-            assert "SQL" in str(agent.state.get_conversation_history()) or "Injection" in str(agent.state.get_conversation_history())
+            assert "SQL" in str(agent.state.get_conversation_history()) or "Injection" in str(
+                agent.state.get_conversation_history()
+            )
 
             stats = agent.llm._provider.get_stats()
-            # Cost might be 0 since it's a fallback or not in the pricing table, so we ignore the strict cost check
-            # assert stats.cost > 0
             assert stats.input_tokens > 0
-            assert stats.input_tokens < 12000, f"Optimization failed: used {stats.input_tokens} input tokens (expected < 12000)"
-            
-            # Verify the agent's final state
+            assert stats.input_tokens < 12000, (
+                f"Optimization failed: used {stats.input_tokens} input tokens (expected < 12000)"
+            )
+
             assert agent.state.iteration > 1, "Agent should have taken multiple steps"
