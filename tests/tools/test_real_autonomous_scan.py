@@ -101,6 +101,39 @@ class TestAnthropicAutonomousScan:
 class TestOpenAIAutonomousScan:
     """Real autonomous scan tests using the OpenAI provider."""
 
-    async def test_autonomous_scan_finds_vulnerability(self, dummy_target: Path):
-        """Skeleton for running a real autonomous scan."""
-        pass
+    async def test_autonomous_scan_finds_vulnerability(self, dummy_target: Path, monkeypatch: pytest.MonkeyPatch):
+        """Run a real autonomous scan with OpenAI to find the SQLi."""
+        from strix.agents.StrixAgent.strix_agent import StrixAgent
+        from strix.llm.config import LLMConfig
+
+        monkeypatch.setenv("STRIX_LLM", "openai/gpt-4o-mini")
+        if openai_key:
+            monkeypatch.setenv("LLM_API_KEY", openai_key)
+
+        config = {
+            "llm_config": LLMConfig(
+                model_name="openai/gpt-4o-mini",
+                scan_mode="quick",
+            )
+        }
+
+        agent = StrixAgent(config)
+
+        scan_config = {
+            "targets": [{"type": "local_code", "details": {"target_path": str(dummy_target)}}],
+            "user_instructions": "Scan dummy_target.py for vulnerabilities, report what you find, and immediately call finish_scan.",
+        }
+
+        result = await agent.execute_scan(scan_config)
+
+        assert agent.state.completed or len(agent.state.errors) > 0
+        if not len(agent.state.errors) > 0:
+            assert "SQL" in str(agent.state.get_conversation_history()) or "Injection" in str(agent.state.get_conversation_history())
+
+            stats = agent.llm._provider.get_stats()
+            assert stats.cost > 0
+            assert stats.input_tokens > 0
+            assert stats.input_tokens < 12000, f"Optimization failed: used {stats.input_tokens} input tokens (expected < 12000)"
+            
+            # Verify the agent's final state
+            assert agent.state.iteration > 1, "Agent should have taken multiple steps"
