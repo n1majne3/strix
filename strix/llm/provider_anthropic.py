@@ -55,52 +55,113 @@ class AnthropicProvider(ProviderBase):
         self._stats.requests += 1
 
         args = self.build_completion_args(messages, tools, tool_choice)
-        response = await acompletion(**args, stream=True)
 
-        async for chunk in response:
-            chunks.append(chunk)
-            if done_streaming:
-                done_streaming += 1
-                if getattr(chunk, "usage", None) or done_streaming > 5:
-                    break
-                continue
+        try:
+            response = await acompletion(**args, stream=True)
+        except Exception as e:
+            # Handle LiteLLM errors during request setup
+            logger.error("LiteLLM request failed: %s", e)
+            raise
 
-            # Extract text delta
-            text_delta = self._get_chunk_content(chunk)
-            if text_delta:
-                accumulated += text_delta
+        # Wrap the entire streaming loop to catch malformed tool call errors
+        # from models that don't properly support Anthropic-style tool calling
+        try:
+            async for chunk in response:
+                chunks.append(chunk)
+                if done_streaming:
+                    done_streaming += 1
+                    if getattr(chunk, "usage", None) or done_streaming > 5:
+                        break
+                    continue
 
-            # Extract tool-call deltas from this chunk
-            raw_delta = None
-            if chunk.choices and hasattr(chunk.choices[0], "delta"):
-                raw_delta = chunk.choices[0].delta
+                # Extract text delta
+                text_delta = self._get_chunk_content(chunk)
+                if text_delta:
+                    accumulated += text_delta
 
-            tc_deltas = getattr(raw_delta, "tool_calls", None) if raw_delta else None
-            if tc_deltas:
-                has_tool_call_data = True
-                for tc in tc_deltas:
-                    idx = getattr(tc, "index", 0)
-                    if idx not in tool_call_states:
-                        tool_call_states[idx] = {"id": "", "name": "", "arguments": ""}
-                    state = tool_call_states[idx]
-                    tc_id = getattr(tc, "id", None)
-                    if tc_id:
-                        state["id"] = tc_id
-                    func = getattr(tc, "function", None)
-                    if func is not None:
-                        name = getattr(func, "name", None)
-                        if name:
-                            state["name"] = name
-                        arguments = getattr(func, "arguments", None)
-                        if arguments:
-                            state["arguments"] += arguments
+                # Extract tool-call deltas from this chunk
+                raw_delta = None
+                if chunk.choices and hasattr(chunk.choices[0], "delta"):
+                    raw_delta = chunk.choices[0].delta
 
-            # Yield intermediate response if there's new content or tool data
-            if text_delta or tc_deltas:
-                yield LLMResponse(
-                    content=accumulated,
-                    streaming_tool_states=dict(tool_call_states) if has_tool_call_data else None,
+                tc_deltas = getattr(raw_delta, "tool_calls", None) if raw_delta else None
+                if tc_deltas:
+                    has_tool_call_data = True
+                    for tc in tc_deltas:
+                        idx = getattr(tc, "index", 0)
+                        if idx not in tool_call_states:
+                            tool_call_states[idx] = {"id": "", "name": "", "arguments": ""}
+                        state = tool_call_states[idx]
+                        tc_id = getattr(tc, "id", None)
+                        if tc_id:
+                            state["id"] = tc_id
+                        func = getattr(tc, "function", None)
+                        if func is not None:
+                            name = getattr(func, "name", None)
+                            if name:
+                                state["name"] = name
+                            arguments = getattr(func, "arguments", None)
+                            if arguments:
+                                state["arguments"] += arguments
+
+                # Yield intermediate response if there's new content or tool data
+                if text_delta or tc_deltas:
+                    yield LLMResponse(
+                        content=accumulated,
+                        streaming_tool_states=dict(tool_call_states) if has_tool_call_data else None,
+                    )
+        except Exception as e:
+            # Catch malformed tool call errors from incompatible models
+            error_msg = str(e)
+            if "Failed to parse tool call arguments" in error_msg or "Unterminated string" in error_msg:
+                logger.warning(
+                    "Model returned malformed tool call arguments. "
+                    "This usually indicates the model doesn't properly support Anthropic-style tool calling. "
+                    "Error: %s",
+                    error_msg[:500],
                 )
+                # Yield what we accumulated so far as text content
+                if accumulated or tool_call_states:
+                    # Try to salvage partial tool calls
+                    tool_invocations = None
+                    tool_calls_raw = None
+                    if tool_call_states:
+                        tool_invocations = []
+                        tool_calls_raw = []
+                        for idx, state in sorted(tool_call_states.items()):
+                            if state["name"]:
+                                # Try to parse arguments, fall back to empty if malformed
+                                try:
+                                    args_parsed = json.loads(state["arguments"]) if state["arguments"] else {}
+                                except json.JSONDecodeError:
+                                    logger.warning(
+                                        "Could not parse arguments for tool %s: %s",
+                                        state["name"],
+                                        state["arguments"][:200],
+                                    )
+                                    args_parsed = {}
+                                tool_invocations.append({
+                                    "toolName": state["name"],
+                                    "args": args_parsed,
+                                    "id": state["id"] or f"salvaged_{idx}",
+                                })
+                                tool_calls_raw.append({
+                                    "id": state["id"] or f"salvaged_{idx}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": state["name"],
+                                        "arguments": state["arguments"],
+                                    },
+                                })
+                    yield LLMResponse(
+                        content=accumulated,
+                        tool_invocations=tool_invocations,
+                        tool_calls=tool_calls_raw,
+                        thinking_blocks=None,
+                    )
+                    return
+            # Re-raise other errors
+            raise
 
         # Build the complete response from chunks for metadata extraction
         built_response = None
