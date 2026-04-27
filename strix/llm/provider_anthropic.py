@@ -7,9 +7,10 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from anthropic import AsyncAnthropic
+from anthropic import APIStatusError, AsyncAnthropic
 
 from strix.llm.provider_base import (
+    LLMRequestFailedError,
     LLMResponse,
     ProviderBase,
     RequestStats,
@@ -85,14 +86,174 @@ class AnthropicProvider(ProviderBase):
     # ProviderBase abstract method implementations
     # ------------------------------------------------------------------
 
-    async def generate_stream(
+    async def generate_stream(  # noqa: PLR0912, PLR0915
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002
     ) -> AsyncIterator[LLMResponse]:
-        raise NotImplementedError("Streaming implemented in Task 5")
+        accumulated = ""
+        tool_call_states: dict[int, dict[str, str]] = {}
+        has_tool_call_data = False
+        thinking_blocks: list[dict[str, Any]] = []
+        current_thinking: dict[str, str] | None = None
+
+        # Usage tracking — populated from stream events
+        input_tokens = 0
+        output_tokens = 0
+        cache_creation_tokens = 0
+        cache_read_tokens = 0
+
+        self._stats.requests += 1
+
+        args = self.build_completion_args(messages, tools, tool_choice)
+
+        try:
+            stream_ctx = self._client.messages.stream(**args)
+        except APIStatusError as exc:
+            if self.should_retry(exc):
+                raise
+            raise LLMRequestFailedError(
+                f"Anthropic request failed: {exc.message}",
+                details=f"status={exc.status_code} body={exc.response.text[:500]}",
+            ) from exc
+
+        async with stream_ctx as stream:
+            try:
+                async for event in stream:
+                    event_type = event.type
+
+                    if event_type == "message_start":
+                        usage = getattr(event.message, "usage", None)
+                        if usage:
+                            input_tokens = getattr(usage, "input_tokens", 0) or 0
+
+                    elif event_type == "content_block_start":
+                        block = event.content_block
+                        if getattr(block, "type", None) == "tool_use":
+                            idx = event.index
+                            tool_call_states[idx] = {
+                                "id": getattr(block, "id", ""),
+                                "name": getattr(block, "name", ""),
+                                "arguments": "",
+                            }
+                            has_tool_call_data = True
+                            yield LLMResponse(
+                                content=accumulated,
+                                streaming_tool_states=dict(tool_call_states),
+                            )
+                        elif getattr(block, "type", None) == "thinking":
+                            current_thinking = {"text": "", "signature": ""}
+
+                    elif event_type == "content_block_delta":
+                        delta = event.delta
+                        delta_type = getattr(delta, "type", "")
+
+                        if delta_type == "text_delta":
+                            accumulated += delta.text
+                            yield LLMResponse(
+                                content=accumulated,
+                                streaming_tool_states=(
+                                    dict(tool_call_states) if has_tool_call_data else None
+                                ),
+                            )
+
+                        elif delta_type == "input_json_delta":
+                            idx = event.index
+                            if idx in tool_call_states:
+                                tool_call_states[idx]["arguments"] += delta.partial_json
+                            yield LLMResponse(
+                                content=accumulated,
+                                streaming_tool_states=dict(tool_call_states),
+                            )
+
+                        elif delta_type == "thinking_delta":
+                            if current_thinking is not None:
+                                current_thinking["text"] += delta.thinking
+
+                    elif event_type == "content_block_stop":
+                        if current_thinking is not None:
+                            thinking_blocks.append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": current_thinking["text"],
+                                    "signature": current_thinking.get("signature", ""),
+                                }
+                            )
+                            current_thinking = None
+
+                    elif event_type == "message_delta":
+                        usage_data = getattr(event, "usage", None)
+                        if usage_data:
+                            output_tokens = getattr(usage_data, "output_tokens", 0) or 0
+                            cache_creation_tokens = (
+                                getattr(usage_data, "cache_creation_input_tokens", 0) or 0
+                            )
+                            cache_read_tokens = (
+                                getattr(usage_data, "cache_read_input_tokens", 0) or 0
+                            )
+                            self._update_usage(
+                                input_tokens,
+                                output_tokens,
+                                cache_creation_tokens,
+                                cache_read_tokens,
+                            )
+
+                    elif event_type == "message_stop":
+                        pass  # Stream end — handled by context manager exit
+
+            except APIStatusError as exc:
+                if self.should_retry(exc):
+                    raise
+                raise LLMRequestFailedError(
+                    f"Anthropic stream failed: {exc.message}",
+                    details=f"status={exc.status_code} body={exc.response.text[:500]}",
+                ) from exc
+
+        # Build final LLMResponse with complete tool state
+        tool_calls_raw: list[dict[str, Any]] | None = None
+        tool_invocations: list[dict[str, Any]] | None = None
+
+        if tool_call_states:
+            tool_calls_raw = []
+            tool_invocations = []
+            for _idx, state in sorted(tool_call_states.items()):
+                tc_dict = {
+                    "id": state["id"],
+                    "type": "function",
+                    "function": {
+                        "name": state["name"],
+                        "arguments": state["arguments"],
+                    },
+                }
+                tool_calls_raw.append(tc_dict)
+
+                # Parse arguments JSON string to typed args dict
+                try:
+                    args_parsed = (
+                        json.loads(state["arguments"]) if state["arguments"] else {}
+                    )
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Failed to parse tool call arguments for %s: %s",
+                        state["name"],
+                        state["arguments"][:200],
+                    )
+                    args_parsed = {}
+
+                tool_invocations.append({
+                    "toolName": state["name"],
+                    "args": args_parsed,
+                    "id": state["id"],
+                })
+
+        yield LLMResponse(
+            content=accumulated,
+            tool_invocations=tool_invocations,
+            tool_calls=tool_calls_raw,
+            thinking_blocks=thinking_blocks or None,
+        )
 
     def supports_vision(self) -> bool:
         """Use model-name heuristics to detect vision capability."""
@@ -193,7 +354,11 @@ class AnthropicProvider(ProviderBase):
                     result[i] = {
                         **result[i],
                         "content": [
-                            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}},
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral"},
+                            },
                         ],
                     }
                 break

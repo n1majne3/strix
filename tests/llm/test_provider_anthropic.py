@@ -1,4 +1,4 @@
-"""Tests for AnthropicProvider — conversion helpers, capabilities, cost, args, retry."""
+"""Tests for AnthropicProvider — conversion helpers, capabilities, cost, args, retry, streaming."""
 
 from __future__ import annotations
 
@@ -7,10 +7,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from anthropic import APIStatusError
 
 from strix.llm.config import LLMConfig
 from strix.llm.provider_anthropic import AnthropicProvider
-from strix.llm.provider_base import ProviderBase, RequestStats
+from strix.llm.provider_base import LLMRequestFailedError, ProviderBase, RequestStats
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +77,14 @@ class TestAnthropicProviderInstantiation:
             ), f"Still abstract: {method_name}"
 
     @pytest.mark.asyncio
-    async def test_generates_stream_raises_not_implemented(self, provider):
-        """generate_stream should raise NotImplementedError (Task 5)."""
-        with pytest.raises(NotImplementedError, match="Streaming implemented in Task 5"):
-            await provider.generate_stream([], [], "auto")
+    async def test_generate_stream_is_async_generator(self, provider):
+        """generate_stream should be an async generator, not raise NotImplementedError."""
+        gen = provider.generate_stream([], [], "auto")
+        try:
+            # Should not raise NotImplementedError on call — returns async generator
+            assert hasattr(gen, "__aiter__")
+        finally:
+            await gen.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -850,3 +855,437 @@ class TestSanitizeToolCallId:
     def test_special_chars(self):
         result = AnthropicProvider._sanitize_tool_call_id("id!@#$%^&*()")
         assert all(c.isalnum() or c in "_-" for c in result)
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_text_event(text: str) -> MagicMock:
+    """content_block_delta with text_delta."""
+    evt = MagicMock()
+    evt.type = "content_block_delta"
+    evt.index = 0
+    delta = MagicMock()
+    delta.type = "text_delta"
+    delta.text = text
+    evt.delta = delta
+    return evt
+
+
+def _make_tool_use_start_event(index: int, tc_id: str, name: str) -> MagicMock:
+    """content_block_start with tool_use."""
+    evt = MagicMock()
+    evt.type = "content_block_start"
+    evt.index = index
+    block = MagicMock()
+    block.type = "tool_use"
+    block.id = tc_id
+    block.name = name
+    evt.content_block = block
+    return evt
+
+
+def _make_input_json_delta_event(index: int, partial_json: str) -> MagicMock:
+    """content_block_delta with input_json_delta."""
+    evt = MagicMock()
+    evt.type = "content_block_delta"
+    evt.index = index
+    delta = MagicMock()
+    delta.type = "input_json_delta"
+    delta.partial_json = partial_json
+    evt.delta = delta
+    return evt
+
+
+def _make_content_block_stop_event(index: int) -> MagicMock:
+    """content_block_stop."""
+    evt = MagicMock()
+    evt.type = "content_block_stop"
+    evt.index = index
+    return evt
+
+
+def _make_message_start_event(input_tokens: int) -> MagicMock:
+    """message_start with usage."""
+    evt = MagicMock()
+    evt.type = "message_start"
+    msg = MagicMock()
+    usage = MagicMock()
+    usage.input_tokens = input_tokens
+    msg.usage = usage
+    evt.message = msg
+    return evt
+
+
+def _make_message_delta_event(
+    output_tokens: int,
+    cache_creation: int = 0,
+    cache_read: int = 0,
+    stop_reason: str = "end_turn",
+) -> MagicMock:
+    """message_delta with usage and stop_reason."""
+    evt = MagicMock()
+    evt.type = "message_delta"
+    usage = MagicMock()
+    usage.output_tokens = output_tokens
+    usage.cache_creation_input_tokens = cache_creation
+    usage.cache_read_input_tokens = cache_read
+    evt.usage = usage
+    delta = MagicMock()
+    delta.stop_reason = stop_reason
+    evt.delta = delta
+    return evt
+
+
+def _make_message_stop_event() -> MagicMock:
+    """message_stop."""
+    evt = MagicMock()
+    evt.type = "message_stop"
+    return evt
+
+
+def _make_thinking_start_event(index: int) -> MagicMock:
+    """content_block_start with thinking block."""
+    evt = MagicMock()
+    evt.type = "content_block_start"
+    evt.index = index
+    block = MagicMock()
+    block.type = "thinking"
+    evt.content_block = block
+    return evt
+
+
+def _make_thinking_delta_event(index: int, text: str) -> MagicMock:
+    """content_block_delta with thinking_delta."""
+    evt = MagicMock()
+    evt.type = "content_block_delta"
+    evt.index = index
+    delta = MagicMock()
+    delta.type = "thinking_delta"
+    delta.thinking = text
+    evt.delta = delta
+    return evt
+
+
+class _AsyncIter:
+    """Wrap a list into an async iterator."""
+
+    def __init__(self, items: list) -> None:
+        self._items = iter(items)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._items)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+class _MockStreamContext:
+    """Async context manager returning _AsyncIter."""
+
+    def __init__(self, events: list) -> None:
+        self._events = events
+
+    async def __aenter__(self):
+        return _AsyncIter(self._events)
+
+    async def __aexit__(self, *args):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Streaming tests
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingBehavior:
+    """Tests for AnthropicProvider.generate_stream."""
+
+    @pytest.mark.asyncio
+    async def test_text_only_streaming(self, provider):
+        """Text deltas accumulate and produce intermediate + final responses."""
+        events = [
+            _make_message_start_event(input_tokens=50),
+            _make_text_event("Hello"),
+            _make_text_event(" world"),
+            _make_message_delta_event(output_tokens=10),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        responses = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            tool_choice="auto",
+        )]
+
+        # 2 intermediate + 1 final
+        assert len(responses) == 3
+
+        # Intermediate responses accumulate text
+        assert responses[0].content == "Hello"
+        assert responses[1].content == "Hello world"
+
+        # Final response has full text
+        assert responses[2].content == "Hello world"
+        assert responses[2].tool_invocations is None
+        assert responses[2].tool_calls is None
+
+    @pytest.mark.asyncio
+    async def test_tool_call_streaming(self, provider):
+        """Tool_use blocks assembled into tool_invocations and tool_calls."""
+        events = [
+            _make_message_start_event(input_tokens=100),
+            _make_tool_use_start_event(0, "toolu_abc", "get_weather"),
+            _make_input_json_delta_event(0, '{"ci'),
+            _make_input_json_delta_event(0, 'ty": "SF"}'),
+            _make_content_block_stop_event(0),
+            _make_message_delta_event(output_tokens=30, stop_reason="tool_use"),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        responses = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "weather?"}],
+            tools=[{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+            tool_choice="auto",
+        )]
+
+        # 1 start + 2 deltas + 1 final = 4
+        assert len(responses) == 4
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert len(final.tool_invocations) == 1
+        assert final.tool_invocations[0]["toolName"] == "get_weather"
+        assert final.tool_invocations[0]["args"] == {"city": "SF"}
+        assert final.tool_invocations[0]["id"] == "toolu_abc"
+
+        assert final.tool_calls is not None
+        assert len(final.tool_calls) == 1
+        assert final.tool_calls[0]["id"] == "toolu_abc"
+        assert final.tool_calls[0]["function"]["name"] == "get_weather"
+        assert final.tool_calls[0]["function"]["arguments"] == '{"city": "SF"}'
+
+    @pytest.mark.asyncio
+    async def test_mixed_text_and_tool_calls(self, provider):
+        """Text then tool calls — both present in final response."""
+        events = [
+            _make_message_start_event(input_tokens=80),
+            _make_text_event("Let me check"),
+            _make_tool_use_start_event(1, "toolu_1", "search"),
+            _make_input_json_delta_event(1, '{"q": "test"}'),
+            _make_content_block_stop_event(1),
+            _make_message_delta_event(output_tokens=50, stop_reason="tool_use"),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        responses = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "search"}],
+            tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
+            tool_choice="auto",
+        )]
+
+        final = responses[-1]
+        assert final.content == "Let me check"
+        assert final.tool_invocations is not None
+        assert final.tool_invocations[0]["toolName"] == "search"
+
+    @pytest.mark.asyncio
+    async def test_usage_extraction(self, provider):
+        """Input/output tokens extracted from message_start/message_delta."""
+        events = [
+            _make_message_start_event(input_tokens=42),
+            _make_text_event("hi"),
+            _make_message_delta_event(
+                output_tokens=7,
+                cache_creation=10,
+                cache_read=5,
+            ),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        _ = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            tool_choice="auto",
+        )]
+
+        stats = provider.get_stats()
+        assert stats.input_tokens == 42
+        assert stats.output_tokens == 7
+        assert stats.cached_tokens == 15  # cache_creation + cache_read
+        assert stats.cost >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_api_error_raises_llm_request_failed(self, provider):
+        """APIStatusError(400) raises LLMRequestFailedError."""
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = "Bad Request"
+        exc = APIStatusError(
+            message="Bad Request",
+            response=mock_response,
+            body=None,
+        )
+        provider._client.messages.stream = MagicMock(side_effect=exc)
+
+        with pytest.raises(LLMRequestFailedError, match="Anthropic request failed"):
+            _ = [r async for r in provider.generate_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                tool_choice="auto",
+            )]
+
+    @pytest.mark.asyncio
+    async def test_retryable_error_reraises(self, provider):
+        """APIStatusError(429) re-raises as-is for retry logic."""
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.text = "Rate Limited"
+        exc = APIStatusError(
+            message="Rate Limited",
+            response=mock_response,
+            body=None,
+        )
+        provider._client.messages.stream = MagicMock(side_effect=exc)
+
+        with pytest.raises(APIStatusError) as exc_info:
+            _ = [r async for r in provider.generate_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                tool_choice="auto",
+            )]
+        assert exc_info.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_arguments_fallback(self, provider):
+        """Invalid JSON in tool arguments falls back to empty dict."""
+        events = [
+            _make_message_start_event(input_tokens=10),
+            _make_tool_use_start_event(0, "toolu_bad", "broken_tool"),
+            _make_input_json_delta_event(0, "{invalid json"),
+            _make_content_block_stop_event(0),
+            _make_message_delta_event(output_tokens=5),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        responses = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "go"}],
+            tools=[{"type": "function", "function": {"name": "broken_tool", "parameters": {}}}],
+            tool_choice="auto",
+        )]
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert final.tool_invocations[0]["args"] == {}
+
+    @pytest.mark.asyncio
+    async def test_multiple_tool_calls(self, provider):
+        """Two tool_use blocks tracked independently."""
+        events = [
+            _make_message_start_event(input_tokens=50),
+            _make_tool_use_start_event(0, "toolu_a", "tool_a"),
+            _make_input_json_delta_event(0, '{"x": 1}'),
+            _make_content_block_stop_event(0),
+            _make_tool_use_start_event(1, "toolu_b", "tool_b"),
+            _make_input_json_delta_event(1, '{"y": 2}'),
+            _make_content_block_stop_event(1),
+            _make_message_delta_event(output_tokens=20, stop_reason="tool_use"),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        responses = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "run both"}],
+            tools=[
+                {"type": "function", "function": {"name": "tool_a", "parameters": {}}},
+                {"type": "function", "function": {"name": "tool_b", "parameters": {}}},
+            ],
+            tool_choice="auto",
+        )]
+
+        final = responses[-1]
+        assert final.tool_invocations is not None
+        assert len(final.tool_invocations) == 2
+
+        assert final.tool_invocations[0]["toolName"] == "tool_a"
+        assert final.tool_invocations[0]["args"] == {"x": 1}
+        assert final.tool_invocations[0]["id"] == "toolu_a"
+
+        assert final.tool_invocations[1]["toolName"] == "tool_b"
+        assert final.tool_invocations[1]["args"] == {"y": 2}
+        assert final.tool_invocations[1]["id"] == "toolu_b"
+
+    @pytest.mark.asyncio
+    async def test_thinking_blocks_extracted(self, provider):
+        """Thinking_delta accumulated into thinking_blocks in final response."""
+        events = [
+            _make_message_start_event(input_tokens=30),
+            _make_thinking_start_event(0),
+            _make_thinking_delta_event(0, "Hmm, "),
+            _make_thinking_delta_event(0, "let me think..."),
+            _make_content_block_stop_event(0),
+            _make_text_event("The answer is 42."),
+            _make_message_delta_event(output_tokens=40),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        responses = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "think"}],
+            tools=[],
+            tool_choice="auto",
+        )]
+
+        final = responses[-1]
+        assert final.thinking_blocks is not None
+        assert len(final.thinking_blocks) == 1
+        assert final.thinking_blocks[0]["type"] == "thinking"
+        assert final.thinking_blocks[0]["thinking"] == "Hmm, let me think..."
+        assert final.content == "The answer is 42."
+
+    @pytest.mark.asyncio
+    async def test_request_counter_increments(self, provider):
+        """stats.requests goes from 0 to 1 after a stream."""
+        events = [
+            _make_message_start_event(input_tokens=10),
+            _make_text_event("ok"),
+            _make_message_delta_event(output_tokens=2),
+            _make_message_stop_event(),
+        ]
+        provider._client.messages.stream = MagicMock(
+            return_value=_MockStreamContext(events),
+        )
+
+        assert provider.get_stats().requests == 0
+
+        _ = [r async for r in provider.generate_stream(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            tool_choice="auto",
+        )]
+
+        assert provider.get_stats().requests == 1
