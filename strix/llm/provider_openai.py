@@ -24,6 +24,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Fallback pricing table (cost per token) for models not yet in litellm
+# ---------------------------------------------------------------------------
+
+_FALLBACK_PRICING: dict[str, tuple[float, float]] = {
+    # model_name: (input_cost_per_token, output_cost_per_token)
+    "gpt-4o": (2.5e-6, 1.0e-5),
+    "gpt-4o-mini": (1.5e-7, 6.0e-7),
+    "gpt-5": (1.25e-6, 1.0e-5),
+    "gpt-5.1": (1.25e-6, 1.0e-5),
+    "gpt-5.2": (1.75e-6, 1.4e-5),
+    "gpt-5.4": (2.5e-6, 1.5e-5),
+}
+
+# ---------------------------------------------------------------------------
 # Model-name heuristics for capability detection
 # ---------------------------------------------------------------------------
 
@@ -229,6 +243,56 @@ class OpenAIProvider(ProviderBase):
 
         return args
 
+    def _extract_cost(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+    ) -> float:
+        """Compute cost from token counts using litellm pricing data.
+
+        Looks up per-token pricing from ``litellm.model_cost`` and falls back
+        to a static pricing table for models not yet indexed by litellm.
+        Returns 0.0 if pricing data is unavailable.
+        """
+        in_cost: float | None = None
+        out_cost: float | None = None
+        cache_cost: float | None = None
+
+        # Try litellm's model_cost database first
+        try:
+            import litellm
+
+            pricing = litellm.model_cost.get(model)
+            if pricing is not None:
+                in_cost = pricing.get("input_cost_per_token")
+                out_cost = pricing.get("output_cost_per_token")
+                cache_cost = pricing.get("cache_read_input_token_cost")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Fall back to static pricing table
+        if in_cost is None or out_cost is None:
+            fallback = _FALLBACK_PRICING.get(model)
+            if fallback is not None:
+                in_cost, out_cost = fallback
+                cache_cost = cache_cost or (in_cost * 0.1)  # 90% cache discount
+
+        if in_cost is None or out_cost is None:
+            return 0.0
+
+        # Compute: bill input minus cached at full rate, cached at cache rate
+        non_cached = max(input_tokens - cached_tokens, 0)
+        total = non_cached * in_cost + output_tokens * out_cost
+        if cached_tokens > 0 and cache_cost is not None:
+            total += cached_tokens * cache_cost
+        elif cached_tokens > 0:
+            # Default: cached tokens at 10% of input cost
+            total += cached_tokens * in_cost * 0.1
+
+        return total
+
     def _update_usage(self, usage: Any) -> None:
         """Extract usage stats from the final streaming chunk."""
         try:
@@ -240,10 +304,17 @@ class OpenAIProvider(ProviderBase):
             if prompt_details and hasattr(prompt_details, "cached_tokens"):
                 cached_tokens = prompt_details.cached_tokens or 0
 
+            cost = self._extract_cost(
+                model=self._model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+            )
+
             self._stats.input_tokens += input_tokens
             self._stats.output_tokens += output_tokens
             self._stats.cached_tokens += cached_tokens
-            # Cost tracking deferred to S03/S04 — always 0.0 for OpenAI
+            self._stats.cost += cost
         except Exception:  # noqa: BLE001
             logger.warning("Failed to extract usage stats from streaming chunk")
 

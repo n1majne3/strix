@@ -265,7 +265,7 @@ class TestUsageStats:
         assert stats.input_tokens == 100
         assert stats.output_tokens == 50
         assert stats.cached_tokens == 20
-        assert stats.cost == 0.0  # Always 0.0 for OpenAI (deferred to S03/S04)
+        assert stats.cost > 0.0  # Cost now calculated from token usage
 
     def test_stats_to_dict_snapshot(self, provider):
         mock_usage = MagicMock()
@@ -280,7 +280,7 @@ class TestUsageStats:
         assert snapshot["input_tokens"] == 50
         assert snapshot["output_tokens"] == 25
         assert snapshot["cached_tokens"] == 10
-        assert snapshot["cost"] == 0.0
+        assert snapshot["cost"] > 0.0  # Cost now calculated
         assert snapshot["requests"] == 0
 
 
@@ -534,3 +534,114 @@ class TestStreamingBehavior:
                 messages=[{"role": "user", "content": "hi"}], tools=[], tool_choice="auto"
             ):
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Cost calculation
+# ---------------------------------------------------------------------------
+
+
+class TestCostCalculation:
+    """Tests for _extract_cost and cost tracking in _update_usage."""
+
+    def test_known_model_returns_nonzero_cost(self, provider):
+        """gpt-5.4 has known pricing — cost should be nonzero."""
+        cost = provider._extract_cost(
+            model="gpt-5.4", input_tokens=1000, output_tokens=500,
+        )
+        assert cost > 0.0
+
+    def test_cost_proportional_to_tokens(self, provider):
+        """Doubling tokens should roughly double cost."""
+        cost_1x = provider._extract_cost(model="gpt-5.4", input_tokens=100, output_tokens=50)
+        cost_2x = provider._extract_cost(model="gpt-5.4", input_tokens=200, output_tokens=100)
+        assert cost_2x == pytest.approx(cost_1x * 2, rel=0.01)
+
+    def test_output_more_expensive_than_input(self, provider):
+        """Output tokens cost more than input tokens for all known models."""
+        cost_in = provider._extract_cost(model="gpt-5.4", input_tokens=1000, output_tokens=0)
+        cost_out = provider._extract_cost(model="gpt-5.4", input_tokens=0, output_tokens=1000)
+        assert cost_out > cost_in
+
+    def test_unknown_model_returns_zero(self, provider):
+        """Unknown model with no litellm data and no fallback returns 0."""
+        with patch("strix.llm.provider_openai.OpenAIProvider._extract_cost",
+                    wraps=provider._extract_cost) as spy:
+            # Force litellm.model_cost to not have the model
+            cost = provider._extract_cost(
+                model="totally-unknown-model-xyz", input_tokens=1000, output_tokens=500,
+            )
+        assert cost == 0.0
+
+    def test_fallback_pricing_used_when_litellm_missing(self, provider):
+        """If litellm doesn't know a model but fallback table does, cost is nonzero."""
+        with patch.dict(
+            "strix.llm.provider_openai._FALLBACK_PRICING",
+            {"custom-model": (1e-5, 5e-5)},
+            clear=True,
+        ):
+            cost = provider._extract_cost(
+                model="custom-model", input_tokens=1000, output_tokens=500,
+            )
+        expected = 1000 * 1e-5 + 500 * 5e-5
+        assert cost == pytest.approx(expected, rel=0.01)
+
+    def test_cached_tokens_reduces_cost(self, provider):
+        """Cached tokens should be cheaper than full input tokens."""
+        cost_no_cache = provider._extract_cost(
+            model="gpt-5.4", input_tokens=1000, output_tokens=500, cached_tokens=0,
+        )
+        cost_with_cache = provider._extract_cost(
+            model="gpt-5.4", input_tokens=1000, output_tokens=500, cached_tokens=500,
+        )
+        assert cost_with_cache < cost_no_cache
+
+    def test_zero_tokens_produces_zero_cost(self, provider):
+        """Zero tokens should produce zero cost."""
+        cost = provider._extract_cost(model="gpt-5.4", input_tokens=0, output_tokens=0)
+        assert cost == 0.0
+
+    def test_update_usage_sets_cost(self, provider):
+        """_update_usage should set stats.cost to a nonzero value."""
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 500
+        mock_usage.completion_tokens = 200
+        prompt_details = MagicMock()
+        prompt_details.cached_tokens = 50
+        mock_usage.prompt_tokens_details = prompt_details
+
+        provider._update_usage(mock_usage)
+        assert provider.get_stats().cost > 0.0
+
+    def test_multiple_usage_updates_accumulate_cost(self, provider):
+        """Multiple _update_usage calls should accumulate cost."""
+        for _ in range(3):
+            mock_usage = MagicMock()
+            mock_usage.prompt_tokens = 100
+            mock_usage.completion_tokens = 50
+            prompt_details = MagicMock()
+            prompt_details.cached_tokens = 0
+            mock_usage.prompt_tokens_details = prompt_details
+            provider._update_usage(mock_usage)
+
+        single_cost = provider._extract_cost(
+            model="gpt-5.4", input_tokens=100, output_tokens=50,
+        )
+        assert provider.get_stats().cost == pytest.approx(single_cost * 3, rel=0.01)
+
+    def test_cost_calculation_uses_litellm_model_cost(self, provider):
+        """Cost should be computed using litellm's model_cost when available."""
+        import litellm
+
+        pricing = litellm.model_cost.get("gpt-5.4")
+        if pricing is None:
+            pytest.skip("gpt-5.4 not in litellm model_cost")
+
+        in_cost = pricing["input_cost_per_token"]
+        out_cost = pricing["output_cost_per_token"]
+
+        cost = provider._extract_cost(
+            model="gpt-5.4", input_tokens=1000, output_tokens=500,
+        )
+        expected = 1000 * in_cost + 500 * out_cost
+        assert cost == pytest.approx(expected, rel=0.01)
