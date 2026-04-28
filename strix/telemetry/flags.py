@@ -13,11 +13,11 @@ def is_otel_enabled() -> bool:
     explicit = Config.get("strix_otel_telemetry")
     if explicit is not None:
         return _is_enabled(explicit)
-    return _is_enabled(Config.get("strix_telemetry"), default="1")
+    return _is_enabled(Config.get("strix_telemetry"), default="0")
 
 
 def is_posthog_enabled() -> bool:
     explicit = Config.get("strix_posthog_telemetry")
     if explicit is not None:
         return _is_enabled(explicit)
-    return _is_enabled(Config.get("strix_telemetry"), default="1")
+    return _is_enabled(Config.get("strix_telemetry"), default="0")
