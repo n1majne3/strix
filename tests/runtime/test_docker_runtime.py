@@ -1,4 +1,5 @@
 import socket
+import subprocess
 from unittest.mock import MagicMock, patch, ANY
 
 import pytest
@@ -213,16 +214,58 @@ def test_cleanup(mock_runtime):
     mock_container = MagicMock()
     mock_container.name = "strix-scan-123"
     mock_runtime._scan_container = mock_container
-    
-    with patch("subprocess.Popen") as mock_popen:
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
         mock_runtime.cleanup()
-        
-    mock_popen.assert_called_once()
-    assert "docker" in mock_popen.call_args[0][0]
-    assert "rm" in mock_popen.call_args[0][0]
-    assert "strix-scan-123" in mock_popen.call_args[0][0]
-    
+
+    mock_run.assert_called_once()
+    args = mock_run.call_args[0][0]
+    assert "docker" in args
+    assert "rm" in args
+    assert "strix-scan-123" in args
+    assert mock_run.call_args[1].get("timeout") == 10
+
     assert mock_runtime._scan_container is None
+
+
+def test_cleanup_with_custom_timeout(mock_runtime):
+    mock_container = MagicMock()
+    mock_container.name = "strix-scan-123"
+    mock_runtime._scan_container = mock_container
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        mock_runtime.cleanup(timeout=30)
+
+    assert mock_run.call_args[1].get("timeout") == 30
+
+
+def test_cleanup_timeout_fallback(mock_runtime):
+    mock_container = MagicMock()
+    mock_container.name = "strix-scan-123"
+    mock_runtime._scan_container = mock_container
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["docker", "rm"], timeout=10)
+        mock_runtime.cleanup()
+
+    # Should fallback to SDK removal
+    mock_container.remove.assert_called_once_with(force=True)
+
+
+def test_cleanup_cli_failure_fallback(mock_runtime):
+    mock_container = MagicMock()
+    mock_container.name = "strix-scan-123"
+    mock_runtime._scan_container = mock_container
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1)
+        mock_runtime.cleanup()
+
+    # Should fallback to SDK removal
+    mock_container.stop.assert_called_once_with(timeout=5)
+    mock_container.remove.assert_called_once_with(force=True)
 
 
 def test_recover_container_state(mock_runtime):

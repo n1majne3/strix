@@ -331,9 +331,10 @@ class DockerRuntime(AbstractRuntime):
         except (NotFound, DockerException):
             pass
 
-    def cleanup(self) -> None:
+    def cleanup(self, timeout: int = 10) -> None:
         if self._scan_container is not None:
-            container_name = self._scan_container.name
+            container = self._scan_container
+            container_name = container.name
             self._scan_container = None
             self._tool_server_port = None
             self._tool_server_token = None
@@ -344,9 +345,19 @@ class DockerRuntime(AbstractRuntime):
 
             import subprocess
 
-            subprocess.Popen(  # noqa: S603
-                ["docker", "rm", "-f", container_name],  # noqa: S607
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            try:
+                result = subprocess.run(
+                    ["docker", "rm", "-f", container_name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout,
+                )
+                if result.returncode != 0:
+                    # Fallback: try via SDK if CLI fails
+                    with contextlib.suppress(NotFound, DockerException):
+                        container.stop(timeout=5)
+                        container.remove(force=True)
+            except subprocess.TimeoutExpired:
+                # Force kill if timeout exceeded
+                with contextlib.suppress(NotFound, DockerException):
+                    container.remove(force=True)
