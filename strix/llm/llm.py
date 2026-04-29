@@ -14,10 +14,6 @@ from strix.utils.resource_paths import get_strix_resource_path
 
 logger = logging.getLogger(__name__)
 
-# Skill categories/prefixes that are always loaded into the system prompt.
-# All other skills (vulnerabilities, tooling, frameworks, etc.) are deferred
-# and only loaded on-demand via the load_skill tool.
-_ESSENTIAL_CATEGORIES = {"scan_modes", "coordination", "root_agent", "custom"}
 
 
 def get_provider(config: LLMConfig, reasoning_effort: str) -> "ProviderBase":
@@ -86,58 +82,56 @@ class LLM:
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
                 system_prompt_context=self._system_prompt_context,
-                is_root_agent=("root_agent" in self._active_skills),
+                is_root_agent=("root-agent" in self._active_skills),
                 **skill_content,
             )
             return str(result)
         except Exception:  # noqa: BLE001
             return ""
 
-    def _is_essential_skill(self, skill_name: str) -> bool:
-        """Check if a skill is in an essential category."""
-        category = skill_name.split("/")[0] if "/" in skill_name else skill_name
-        return category in _ESSENTIAL_CATEGORIES
-
     def _get_skills_to_load(self) -> list[str]:
-        # Filter active skills to essential categories + force-loaded (on-demand) skills
+        from strix.skills import discover_skills
+
+        discovered = discover_skills()
+
         essential_skills = [
-            s for s in self._active_skills if self._is_essential_skill(s)
-        ]
-        forced_skills = [
-            s for s in self._active_skills if s in self._force_loaded_skills
+            name for name, info in discovered.items()
+            if info.get("essential") == "true"
         ]
 
-        # Build ordered list: essential + forced (preserving order), then always-appended skills
-        ordered_skills: list[str] = []
+        forced_skills = [s for s in self._force_loaded_skills]
+
+        active_essential = [
+            s for s in self._active_skills
+            if discovered.get(s, {}).get("essential") == "true"
+        ]
+
+        ordered: list[str] = []
         seen: set[str] = set()
-        for skill_name in essential_skills + forced_skills:
-            if skill_name not in seen:
-                ordered_skills.append(skill_name)
-                seen.add(skill_name)
+        for name in active_essential + essential_skills + forced_skills:
+            if name not in seen:
+                ordered.append(name)
+                seen.add(name)
 
-        ordered_skills.append(f"scan_modes/{self.config.scan_mode}")
+        scan_mode = self.config.scan_mode
+        if scan_mode and scan_mode not in seen:
+            ordered.append(scan_mode)
+            seen.add(scan_mode)
+
         if self.config.is_whitebox:
-            ordered_skills.append("coordination/source_aware_whitebox")
-            ordered_skills.append("custom/source_aware_sast")
+            for wb in ("source-aware-whitebox", "source-aware-sast"):
+                if wb not in seen and wb in discovered:
+                    ordered.append(wb)
+                    seen.add(wb)
 
-        # Deduplicate preserving order
-        deduped: list[str] = []
-        seen2: set[str] = set()
-        for skill_name in ordered_skills:
-            if skill_name not in seen2:
-                deduped.append(skill_name)
-                seen2.add(skill_name)
+        logger.info(
+            "Skill loading: %d essential, %d forced, scan_mode=%s",
+            len([s for s in ordered if discovered.get(s, {}).get("essential") == "true"]),
+            len([s for s in ordered if s in self._force_loaded_skills]),
+            scan_mode,
+        )
 
-        deferred = len(self._active_skills) - len(essential_skills)
-        if deferred > 0 or self._force_loaded_skills:
-            logger.info(
-                "Skill loading: %d essential, %d deferred, %d force-loaded",
-                len(essential_skills),
-                deferred,
-                len(self._force_loaded_skills),
-            )
-
-        return deduped
+        return ordered
 
     def add_skills(self, skill_names: list[str]) -> list[str]:
         added: list[str] = []
