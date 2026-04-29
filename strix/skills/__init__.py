@@ -5,6 +5,7 @@ from strix.utils.resource_paths import get_strix_resource_path
 
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SKILL_FILENAME = "SKILL.md"
+_discovery_cache: dict[str, dict[str, dict[str, str]]] = {}
 
 
 def _parse_frontmatter(content: str) -> dict[str, str]:
@@ -27,6 +28,10 @@ def discover_skills(skills_dir: Path | None = None) -> dict[str, dict[str, str]]
     if skills_dir is None:
         skills_dir = get_strix_resource_path("skills")
 
+    cache_key = str(skills_dir)
+    if cache_key in _discovery_cache:
+        return _discovery_cache[cache_key]
+
     if not skills_dir.exists():
         return {}
 
@@ -48,6 +53,7 @@ def discover_skills(skills_dir: Path | None = None) -> dict[str, dict[str, str]]
             "essential": meta.get("essential", ""),
         }
 
+    _discovery_cache[cache_key] = discovered
     return discovered
 
 
