@@ -173,6 +173,7 @@ class LLM:
             try:
                 async for response in self._stream(messages):
                     yield response
+                self._sync_stats()
                 return  # noqa: TRY300
             except Exception as e:  # noqa: BLE001
                 if attempt >= max_retries or not self._provider.should_retry(e):
@@ -250,6 +251,14 @@ class LLM:
             messages.append({"role": "user", "content": "<meta>Continue the task.</meta>"})
 
         return messages
+
+    def _sync_stats(self) -> None:
+        provider_stats = self._provider.get_stats()
+        self._total_stats.input_tokens = provider_stats.input_tokens
+        self._total_stats.output_tokens = provider_stats.output_tokens
+        self._total_stats.cached_tokens = provider_stats.cached_tokens
+        self._total_stats.cost = provider_stats.cost
+        self._total_stats.requests = provider_stats.requests
 
     def _raise_error(self, e: Exception) -> None:
         from strix.telemetry import posthog
