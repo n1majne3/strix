@@ -332,13 +332,13 @@ CRITICAL RULES:
 AGENT SPECIALIZATION EXAMPLES:
 
 GOOD SPECIALIZATION:
-- "SQLi Validation Agent" with skills: sql_injection
+- "SQLi Validation Agent" with skills: sql-injection
 - "XSS Discovery Agent" with skills: xss
-- "Auth Testing Agent" with skills: authentication_jwt, business_logic
+- "Auth Testing Agent" with skills: authentication-jwt, business-logic
 - "SSRF + XXE Agent" with skills: ssrf, xxe, rce (related attack vectors)
 
 BAD SPECIALIZATION:
-- "General Web Testing Agent" with skills: sql_injection, xss, csrf, ssrf, authentication_jwt (too broad)
+- "General Web Testing Agent" with skills: sql-injection, xss, csrf, ssrf, authentication-jwt (too broad)
 - "Everything Agent" with skills: all available skills (completely unfocused)
 - Any agent with more than 5 skills (violates constraints)
 
