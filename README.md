@@ -138,8 +138,8 @@ Uses the native `openai` AsyncOpenAI client with:
 
 Skills are loaded in two phases:
 
-1. **Essential** (always loaded): `scan_modes`, `coordination`, `root_agent`, `custom`
-2. **Deferred** (on-demand): `vulnerabilities`, `tooling`, `frameworks`, `technologies`
+1. **Essential** (always loaded): skills marked `essential: true`, such as `root-agent`, `quick`, `standard`, and `deep`
+2. **Deferred** (on-demand): non-essential skills such as `sql-injection`, `xss`, `nmap`, and `fastapi`
 
 Deferred skills are loaded via the `load_skill` tool when the agent needs them.
 

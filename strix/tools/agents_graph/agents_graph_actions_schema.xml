@@ -92,14 +92,14 @@ Only create a new agent if no existing agent is handling the specific task.</des
   <parameter=task>Validate and exploit the suspected SQL injection vulnerability found in
               the login form. Confirm exploitability and document proof of concept.</parameter>
   <parameter=name>SQLi Validator</parameter>
-  <parameter=skills>sql_injection</parameter>
+  <parameter=skills>sql-injection</parameter>
   </function>
 
   <function=create_agent>
   <parameter=task>Test authentication mechanisms, JWT implementation, and session management
               for security vulnerabilities and bypass techniques.</parameter>
   <parameter=name>Auth Specialist</parameter>
-  <parameter=skills>authentication_jwt, business_logic</parameter>
+  <parameter=skills>authentication-jwt,business-logic</parameter>
   </function>
 
   # Example of single-skill specialization (most focused)
