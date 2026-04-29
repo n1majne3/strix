@@ -127,13 +127,13 @@ def test_load_skill_does_not_reload_skill_already_present_from_agent_creation() 
         instances.clear()
         instances[state.agent_id] = _DummyAgent(["xss"])
 
-        result = load_skill_actions.load_skill(state, "xss,sql_injection")
+        result = load_skill_actions.load_skill(state, "xss,sql-injection")
 
         assert result["success"] is True
-        assert result["loaded_skills"] == ["xss", "sql_injection"]
-        assert result["newly_loaded_skills"] == ["sql_injection"]
+        assert result["loaded_skills"] == ["xss", "sql-injection"]
+        assert result["newly_loaded_skills"] == ["sql-injection"]
         assert result["already_loaded_skills"] == ["xss"]
-        assert state.context["loaded_skills"] == ["sql_injection", "xss"]
+        assert state.context["loaded_skills"] == ["sql-injection", "xss"]
     finally:
         instances.clear()
         instances.update(original_instances)
