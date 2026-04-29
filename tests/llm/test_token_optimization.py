@@ -8,11 +8,10 @@ Verifies the three optimizations from M003/S02:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from strix.llm.config import LLMConfig
-from strix.llm.llm import LLM, _ESSENTIAL_CATEGORIES
+from strix.llm.llm import LLM
 from strix.llm.memory_compressor import MemoryCompressor
+from strix.skills import discover_skills, load_skills
 
 
 # ---------------------------------------------------------------------------
@@ -63,14 +62,14 @@ class TestLazySkillLoading:
     """Verify subagents skip non-essential skills in the system prompt."""
 
     def test_subagent_no_vuln_skills_in_prompt(self):
-        config = _make_config(skills=["sql_injection", "xss"])
+        config = _make_config(skills=["sql-injection", "xss"])
         llm = _make_llm_with_real_prompt(config)
 
         prompt = llm.system_prompt
-        # sql_injection and xss are in the 'vulnerabilities' category — not essential.
+        # sql-injection and xss are in the 'vulnerabilities' category — not essential.
         # Skills are wrapped in <skill_name> tags in the prompt.
         # Check that the full skill content block is absent.
-        assert "<sql_injection>" not in prompt
+        assert "<sql-injection>" not in prompt
         assert "<xss>" not in prompt
 
     def test_subagent_no_tooling_skills_in_prompt(self):
@@ -91,46 +90,40 @@ class TestLazySkillLoading:
         assert "<nextjs>" not in prompt
 
     def test_root_agent_skill_is_essential(self):
-        """root_agent is in the coordination category — an essential category."""
-        config = _make_config(skills=["root_agent"])
+        """root-agent stays marked essential in discovery metadata."""
+        config = _make_config(skills=["root-agent"])
         llm = _make_llm_with_real_prompt(config)
 
-        # The root_agent skill should be in the loaded set
-        assert "root_agent" in llm._active_skills
-        # And it should pass the essential check
-        assert llm._is_essential_skill("root_agent")
+        assert "root-agent" in llm._active_skills
+        assert discover_skills()["root-agent"]["essential"] == "true"
 
     def test_root_agent_skill_content_in_prompt(self):
-        """Root agent prompt includes the root_agent skill content."""
-        config = _make_config(skills=["root_agent"])
+        """Root agent prompt includes the root-agent skill content."""
+        config = _make_config(skills=["root-agent"])
         llm = _make_llm_with_real_prompt(config)
 
         prompt = llm.system_prompt
-        # The root_agent.md has "Orchestration layer"
+        # The root-agent skill has "Orchestration layer"
         assert "Orchestration layer" in prompt or "root-agent" in prompt.lower()
 
-    def test_essential_categories_constant(self):
-        """Verify the essential categories are what we expect."""
-        assert "scan_modes" in _ESSENTIAL_CATEGORIES
-        assert "coordination" in _ESSENTIAL_CATEGORIES
-        assert "root_agent" in _ESSENTIAL_CATEGORIES
-        assert "custom" in _ESSENTIAL_CATEGORIES
-        # Non-essential categories
-        assert "vulnerabilities" not in _ESSENTIAL_CATEGORIES
-        assert "tooling" not in _ESSENTIAL_CATEGORIES
-        assert "frameworks" not in _ESSENTIAL_CATEGORIES
+    def test_scan_mode_skills_are_not_marked_essential(self):
+        """Scan-mode skills are conditional, not essential-by-frontmatter."""
+        discovered = discover_skills()
+        assert discovered["root-agent"]["essential"] == "true"
+        assert discovered["quick"]["essential"] != "true"
+        assert discovered["standard"]["essential"] != "true"
+        assert discovered["deep"]["essential"] != "true"
 
     def test_get_skills_to_load_filters_deferred(self):
         """_get_skills_to_load returns only essential + force-loaded skills."""
-        config = _make_config(skills=["sql_injection", "xss", "root_agent"])
+        config = _make_config(skills=["sql-injection", "xss", "root-agent"])
         llm = _make_llm_with_real_prompt(config)
 
         loaded = llm._get_skills_to_load()
-        # root_agent (coordination) is essential; sql_injection and xss are deferred
-        # scan_modes/deep is always appended
-        assert any("root_agent" in s for s in loaded)
-        assert "scan_modes/deep" in loaded
-        assert "sql_injection" not in loaded
+        # root-agent is essential; sql-injection and xss are deferred.
+        assert "root-agent" in loaded
+        assert "deep" in loaded
+        assert "sql-injection" not in loaded
         assert "xss" not in loaded
 
 
@@ -146,17 +139,17 @@ class TestOnDemandSkillLoading:
         config = _make_config(skills=[])
         llm = _make_llm_with_real_prompt(config)
 
-        # Initially no sql_injection skill tag
+        # Initially no sql-injection skill tag
         initial_prompt = llm.system_prompt
-        assert "<sql_injection>" not in initial_prompt
+        assert "<sql-injection>" not in initial_prompt
 
-        # Add sql_injection on demand
-        added = llm.add_skills(["sql_injection"])
-        assert "sql_injection" in added
+        # Add sql-injection on demand
+        added = llm.add_skills(["sql-injection"])
+        assert "sql-injection" in added
 
-        # Now the prompt should contain the sql_injection skill block
+        # Now the prompt should contain the sql-injection skill block
         updated_prompt = llm.system_prompt
-        assert "<sql_injection>" in updated_prompt
+        assert "<sql-injection>" in updated_prompt
         assert "SQL Injection" in updated_prompt
 
     def test_add_skills_tracks_force_loaded(self):
@@ -172,10 +165,10 @@ class TestOnDemandSkillLoading:
         config = _make_config(skills=[])
         llm = _make_llm_with_real_prompt(config)
 
-        added1 = llm.add_skills(["sql_injection"])
-        assert "sql_injection" in added1
+        added1 = llm.add_skills(["sql-injection"])
+        assert "sql-injection" in added1
 
-        added2 = llm.add_skills(["sql_injection"])
+        added2 = llm.add_skills(["sql-injection"])
         assert added2 == []
 
     def test_force_loaded_skills_in_get_skills_to_load(self):
@@ -183,9 +176,9 @@ class TestOnDemandSkillLoading:
         config = _make_config(skills=[])
         llm = _make_llm_with_real_prompt(config)
 
-        llm.add_skills(["sql_injection"])
+        llm.add_skills(["sql-injection"])
         loaded = llm._get_skills_to_load()
-        assert "sql_injection" in loaded
+        assert "sql-injection" in loaded
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +190,7 @@ class TestConditionalMultiAgentSystem:
     """Verify multi_agent_system section is rendered only for root agents."""
 
     def test_subagent_no_multi_agent_system(self):
-        config = _make_config(skills=[])  # No root_agent skill
+        config = _make_config(skills=[])  # No root-agent skill
         llm = _make_llm_with_real_prompt(config)
 
         prompt = llm.system_prompt
@@ -205,7 +198,7 @@ class TestConditionalMultiAgentSystem:
         assert "<multi_agent_system>" not in prompt
 
     def test_root_agent_has_multi_agent_system(self):
-        config = _make_config(skills=["root_agent"])
+        config = _make_config(skills=["root-agent"])
         llm = _make_llm_with_real_prompt(config)
 
         prompt = llm.system_prompt
@@ -213,14 +206,14 @@ class TestConditionalMultiAgentSystem:
         assert "AGENT ISOLATION & SANDBOXING" in prompt
 
     def test_is_root_agent_derived_from_skills(self):
-        """is_root_agent is True when root_agent is in active skills."""
-        config_root = _make_config(skills=["root_agent"])
+        """is_root_agent is True when root-agent is in active skills."""
+        config_root = _make_config(skills=["root-agent"])
         llm_root = _make_llm_with_real_prompt(config_root)
-        assert "root_agent" in llm_root._active_skills
+        assert "root-agent" in llm_root._active_skills
 
-        config_sub = _make_config(skills=["sql_injection"])
+        config_sub = _make_config(skills=["sql-injection"])
         llm_sub = _make_llm_with_real_prompt(config_sub)
-        assert "root_agent" not in llm_sub._active_skills
+        assert "root-agent" not in llm_sub._active_skills
 
 
 # ---------------------------------------------------------------------------
@@ -291,21 +284,21 @@ class TestScanModeAlwaysLoaded:
     """Verify scan_modes skill is always included regardless of lazy loading."""
 
     def test_scan_mode_deep_always_in_skills_to_load(self):
-        config = _make_config(skills=["sql_injection", "xss"], scan_mode="deep")
+        config = _make_config(skills=["sql-injection", "xss"], scan_mode="deep")
         llm = _make_llm_with_real_prompt(config)
 
         loaded = llm._get_skills_to_load()
-        assert "scan_modes/deep" in loaded
+        assert "deep" in loaded
 
     def test_scan_mode_quick_always_in_skills_to_load(self):
-        config = _make_config(skills=["sql_injection"], scan_mode="quick")
+        config = _make_config(skills=["sql-injection"], scan_mode="quick")
         llm = _make_llm_with_real_prompt(config)
 
         loaded = llm._get_skills_to_load()
-        assert "scan_modes/quick" in loaded
+        assert "quick" in loaded
 
     def test_scan_mode_content_in_prompt(self):
-        config = _make_config(skills=["sql_injection"], scan_mode="deep")
+        config = _make_config(skills=["sql-injection"], scan_mode="deep")
         llm = _make_llm_with_real_prompt(config)
 
         prompt = llm.system_prompt
@@ -326,16 +319,21 @@ class TestWhiteboxCoordinationSkills:
         llm = _make_llm_with_real_prompt(config)
 
         loaded = llm._get_skills_to_load()
-        assert "coordination/source_aware_whitebox" in loaded
-        assert "custom/source_aware_sast" in loaded
+        assert "source-aware-whitebox" in loaded
+        assert "source-aware-sast" in loaded
 
     def test_whitebox_skills_not_included_for_blackbox(self):
         config = _make_config(skills=[], is_whitebox=False)
         llm = _make_llm_with_real_prompt(config)
 
         loaded = llm._get_skills_to_load()
-        assert "coordination/source_aware_whitebox" not in loaded
-        assert "custom/source_aware_sast" not in loaded
+        assert "source-aware-whitebox" not in loaded
+        assert "source-aware-sast" not in loaded
+
+    def test_source_aware_whitebox_recommends_valid_skill_name(self):
+        skill_content = load_skills(["source-aware-whitebox"])["source-aware-whitebox"]
+        assert "`source-aware-sast`" in skill_content
+        assert "`source_aware_sast`" not in skill_content
 
 
 # ---------------------------------------------------------------------------
@@ -348,17 +346,17 @@ class TestBaselineMeasurements:
 
     def test_subagent_prompt_smaller_than_root(self):
         """Subagent prompt should be significantly smaller than root agent prompt."""
-        # Root agent: has root_agent skill + multi_agent_system section
+        # Root agent: has root-agent skill + multi_agent_system section
         config_root = _make_config(
-            skills=["root_agent", "sql_injection", "xss", "nmap", "ffuf"],
+            skills=["root-agent", "sql-injection", "xss", "nmap", "ffuf"],
             scan_mode="deep",
         )
         llm_root = _make_llm_with_real_prompt(config_root)
         root_prompt = llm_root.system_prompt
 
-        # Subagent: no root_agent skill, deferred vuln skills
+        # Subagent: no root-agent skill, deferred vuln skills
         config_sub = _make_config(
-            skills=["sql_injection", "xss", "nmap", "ffuf"],
+            skills=["sql-injection", "xss", "nmap", "ffuf"],
             scan_mode="deep",
         )
         llm_sub = _make_llm_with_real_prompt(config_sub)
@@ -388,7 +386,7 @@ class TestBaselineMeasurements:
         """Measure how much content is deferred for a typical subagent."""
         # Subagent with lots of non-essential skills
         config_deferred = _make_config(
-            skills=["sql_injection", "xss", "ffuf", "nmap", "fastapi", "nextjs"],
+            skills=["sql-injection", "xss", "ffuf", "nmap", "fastapi", "nextjs"],
             scan_mode="deep",
         )
         llm_deferred = _make_llm_with_real_prompt(config_deferred)
@@ -396,11 +394,11 @@ class TestBaselineMeasurements:
 
         # Same config but with all skills force-loaded
         config_all = _make_config(
-            skills=["sql_injection", "xss", "ffuf", "nmap", "fastapi", "nextjs"],
+            skills=["sql-injection", "xss", "ffuf", "nmap", "fastapi", "nextjs"],
             scan_mode="deep",
         )
         llm_all = _make_llm_with_real_prompt(config_all)
-        llm_all.add_skills(["sql_injection", "xss", "ffuf", "nmap", "fastapi", "nextjs"])
+        llm_all.add_skills(["sql-injection", "xss", "ffuf", "nmap", "fastapi", "nextjs"])
         full_prompt = llm_all.system_prompt
 
         deferred_chars = len(deferred_prompt)
@@ -424,41 +422,26 @@ class TestBaselineMeasurements:
 class TestSkillFilterPipeline:
     """End-to-end tests for the skill filtering pipeline."""
 
-    def test_essential_skill_not_deferred(self):
-        """Skills in essential categories are never deferred."""
-        for category in _ESSENTIAL_CATEGORIES:
-            config = _make_config(skills=[f"{category}/test_skill"])
-            llm = _make_llm_with_real_prompt(config)
-
-            assert llm._is_essential_skill(f"{category}/test_skill"), (
-                f"Skill in category '{category}' should be essential"
-            )
-
-    def test_category_extraction(self):
-        """Verify _is_essential_skill correctly extracts categories."""
-        config = _make_config(skills=[])
-        llm = _make_llm_with_real_prompt(config)
-
-        # Category/prefix format
-        assert llm._is_essential_skill("scan_modes/deep")
-        assert llm._is_essential_skill("coordination/source_aware_whitebox")
-        assert llm._is_essential_skill("root_agent")
-        assert not llm._is_essential_skill("vulnerabilities/sql_injection")
-        assert not llm._is_essential_skill("tooling/ffuf")
-        assert not llm._is_essential_skill("frameworks/fastapi")
+    def test_discover_skills_uses_hyphenated_identifiers(self):
+        """Discovery exposes the migrated hyphenated skill IDs."""
+        discovered = discover_skills()
+        assert "root-agent" in discovered
+        assert "sql-injection" in discovered
+        assert "root_agent" not in discovered
+        assert "sql_injection" not in discovered
 
     def test_mixed_skills_loads_only_essential_plus_scan_mode(self):
         """Mixed skill list: only essential + scan_mode are loaded initially."""
         config = _make_config(
-            skills=["root_agent", "sql_injection", "xss", "ffuf"],
+            skills=["root-agent", "sql-injection", "xss", "ffuf"],
             scan_mode="standard",
         )
         llm = _make_llm_with_real_prompt(config)
 
         loaded = llm._get_skills_to_load()
-        # root_agent is essential; sql_injection, xss, ffuf are not
-        assert any("root_agent" in s for s in loaded)
-        assert "scan_modes/standard" in loaded
-        assert "sql_injection" not in loaded
+        # root-agent is essential; sql-injection, xss, ffuf are not.
+        assert "root-agent" in loaded
+        assert "standard" in loaded
+        assert "sql-injection" not in loaded
         assert "xss" not in loaded
         assert "ffuf" not in loaded

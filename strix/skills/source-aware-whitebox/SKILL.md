@@ -2,7 +2,6 @@
 name: source-aware-whitebox
 description: Coordination playbook for source-aware white-box testing with static triage and dynamic validation
 category: coordination
-essential: true
 ---
 # Source-Aware White-Box Coordination
 
@@ -40,7 +39,7 @@ Coverage target per repository:
 ## Agent Delegation Guidance
 
 - Keep child agents specialized by vulnerability/component as usual.
-- For source-heavy subtasks, prefer creating child agents with `source_aware_sast` skill.
+- For source-heavy subtasks, prefer creating child agents with `source-aware-sast` skill.
 - Use source findings to shape payloads and endpoint selection for dynamic testing.
 
 ## Wiki Note Requirement (Source Map)

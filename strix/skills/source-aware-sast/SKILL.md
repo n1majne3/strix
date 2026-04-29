@@ -2,7 +2,6 @@
 name: source-aware-sast
 description: Practical source-aware SAST and AST playbook for semgrep, ast-grep, gitleaks, and trivy fs
 category: custom
-essential: true
 ---
 # Source-Aware SAST Playbook
 
