@@ -1,70 +1,59 @@
-# 📚 Strix Skills
+# Strix Skills
 
-## 🎯 Overview
+Skills are specialized knowledge packages in standard `SKILL.md` format.
 
-Skills are specialized knowledge packages that enhance Strix agents with deep expertise in specific vulnerability types, technologies, and testing methodologies. Each skill provides advanced techniques, practical examples, and validation methods that go beyond baseline security knowledge.
+## Structure
 
----
+Each skill is a directory containing a `SKILL.md` file:
 
-## 🏗️ Architecture
-
-### How Skills Work
-
-When an agent is created, it can load up to 5 specialized skills relevant to the specific subtask and context at hand:
-
-```python
-# Agent creation with specialized skills
-create_agent(
-    task="Test authentication mechanisms in API",
-    name="Auth Specialist",
-    skills="authentication_jwt,business_logic"
-)
+```
+strix/skills/
+  xss/SKILL.md
+  sql-injection/SKILL.md
+  kubernetes/SKILL.md
 ```
 
-The skills are dynamically injected into the agent's system prompt, allowing it to operate with deep expertise tailored to the specific vulnerability types or technologies required for the task at hand.
+## Format
 
+```yaml
+---
+name: sql-injection
+description: One-line description
+category: vulnerabilities
+essential: true          # optional; auto-loads at startup
 ---
 
-## 📁 Skill Categories
+# Skill Title
 
-| Category | Purpose |
-|----------|---------|
-| **`/vulnerabilities`** | Advanced testing techniques for core vulnerability classes like authentication bypasses, business logic flaws, and race conditions |
-| **`/frameworks`** | Specific testing methods for popular frameworks e.g. Django, Express, FastAPI, and Next.js |
-| **`/technologies`** | Specialized techniques for third-party services such as Supabase, Firebase, Auth0, and payment gateways |
-| **`/protocols`** | Protocol-specific testing patterns for GraphQL, WebSocket, OAuth, and other communication standards |
-| **`/tooling`** | Command-line playbooks for core sandbox tools (nmap, nuclei, httpx, ffuf, subfinder, naabu, katana, sqlmap) |
-| **`/cloud`** | Cloud provider security testing for AWS, Azure, GCP, and Kubernetes environments |
-| **`/reconnaissance`** | Advanced information gathering and enumeration techniques for comprehensive attack surface mapping |
-| **`/custom`** | Community-contributed skills for specialized or industry-specific testing scenarios |
+Content here...
+```
 
-Notable source-aware skills:
-- `source_aware_whitebox` (coordination): white-box orchestration playbook
-- `source_aware_sast` (custom): semgrep/AST/secrets/supply-chain static triage workflow
+**Frontmatter fields:**
+- `name` — must match directory name, use hyphens
+- `description` — one-line summary
+- `category` — vulnerabilities, tooling, frameworks, cloud, technologies, protocols, ctf, scan-modes, coordination, custom
+- `essential` — set `true` to auto-load at startup (omit for on-demand skills)
 
----
+## Categories
 
-## 🎨 Creating New Skills
+| Category | Description |
+|----------|-------------|
+| vulnerabilities | SQL injection, XSS, SSRF, etc. |
+| tooling | nmap, nuclei, ffuf, etc. |
+| frameworks | FastAPI, Next.js, NestJS |
+| cloud | Kubernetes, AWS, GCP |
+| technologies | Supabase, Firebase |
+| protocols | GraphQL |
+| ctf | CTF challenge types |
+| scan-modes | quick, standard, deep |
+| coordination | Root agent orchestration |
+| custom | User-contributed skills |
 
-### What Should a Skill Contain?
+## Creating Skills
 
-A good skill is a structured knowledge package that typically includes:
+1. Create directory: `strix/skills/<name>/`
+2. Add `SKILL.md` with frontmatter and content
+3. Set `category` to the appropriate classification
+4. Set `essential: true` only if the skill must load at startup
 
-- **Advanced techniques** - Non-obvious methods specific to the task and domain
-- **Practical examples** - Working payloads, commands, or test cases with variations
-- **Validation methods** - How to confirm findings and avoid false positives
-- **Context-specific insights** - Environment and version nuances, configuration-dependent behavior, and edge cases
-- **YAML frontmatter** - `name` and `description` fields for skill metadata
-
-Skills focus on deep, specialized knowledge to significantly enhance agent capabilities. They are dynamically injected into agent context when needed.
-
----
-
-## 🤝 Contributing
-
-Community contributions are more than welcome — contribute new skills via [pull requests](https://github.com/usestrix/strix/pulls) or [GitHub issues](https://github.com/usestrix/strix/issues) to help expand the collection and improve extensibility for Strix agents.
-
----
-
-> [!NOTE]
-> **Work in Progress** - We're actively expanding the skills collection with specialized techniques and new categories.
+Skills are discovered automatically. No registration needed.
