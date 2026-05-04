@@ -113,7 +113,7 @@ def parse_tool_invocations(content: str) -> list[dict[str, Any]] | None:
             args[param_name] = param_value
 
         if not args:
-            body_stripped = fn_body.strip()
+            body_stripped = html.unescape(fn_body.strip())
             if body_stripped.startswith("{"):
                 try:
                     parsed = json.loads(body_stripped)
